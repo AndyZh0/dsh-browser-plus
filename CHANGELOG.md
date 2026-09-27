@@ -1,5 +1,9 @@
 # Changelog
 
+## v0.4.2 (2026-09-17)
+
+- **按站点清理 Cookie**: `browser_auth action="clear"` 支持按 `domain`(含子域)与/或 `name` 精确删除 Cookie;未限定范围时必须显式 `all: true`,避免误清全部登录态。用于清理 WAF 轮换名称留下的旧代挑战 Cookie。
+
 ## v0.4.1 (2026-08-26)
 
 - **多标签会话恢复**: keyed browser sessions are recovered when the tool-layer session cache is lost, so the first direct switch or close operation still targets the existing tabs.

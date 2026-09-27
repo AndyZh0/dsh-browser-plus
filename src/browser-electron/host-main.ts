@@ -23,7 +23,7 @@ import { join } from 'node:path'
 import { buildPageChromeScript } from './page-chrome.js'
 import { taskSummaryUrl } from './task-summary.js'
 import { taskThumbnailDataUrl } from './task-thumbnail.js'
-import { exportCookiesForAuth } from './auth-cookies.js'
+import { exportCookiesForAuth, selectCookiesForClear } from './auth-cookies.js'
 import { resolveBrowserIconPath } from './icon.js'
 import { createBootstrap, createPatch, type ChromePatchOperation, type ChromeTaskSummary, type ChromeTrailEntry, type ChromeWorkspaceState } from './chrome-state.js'
 
@@ -433,7 +433,7 @@ function reply(id: number, payload: Record<string, unknown>): void {
 }
 
 /** Handle one command. */
-async function handle(op: string, msg: { id: number; viewId?: string; method?: string; params?: Record<string, unknown>; url?: string; savePath?: string; cookies?: unknown[]; entry?: unknown; key?: string; label?: string; task?: Record<string, unknown> }): Promise<void> {
+async function handle(op: string, msg: { id: number; viewId?: string; method?: string; params?: Record<string, unknown>; url?: string; savePath?: string; cookies?: unknown[]; entry?: unknown; key?: string; label?: string; task?: Record<string, unknown>; domain?: string; name?: string; all?: boolean }): Promise<void> {
   try {
     switch (op) {
       case 'ping':
@@ -823,6 +823,29 @@ async function handle(op: string, msg: { id: number; viewId?: string; method?: s
         reply(msg.id, { ok: true, result: { restored } })
         return
       }
+      case 'clearCookies': {
+        const viewId = msg.viewId
+        if (viewId === undefined) throw new Error('clearCookies missing viewId')
+        const entry = views.get(viewId)
+        if (entry === undefined) throw new Error('clearCookies: unknown view ' + viewId)
+        // Remove the cookies the caller scoped by domain and/or name. An
+        // unscoped request must pass all: true, so a missing filter can never
+        // wipe every login in the profile.
+        const filter = {
+          ...typeof msg.domain === 'string' && msg.domain !== '' ? { domain: msg.domain } : {},
+          ...typeof msg.name === 'string' && msg.name !== '' ? { name: msg.name } : {},
+          ...msg.all === true ? { all: true } : {},
+        }
+        const cookies = await entry.webContentsView.webContents.session.cookies.get({})
+        const targets = selectCookiesForClear(cookies, filter)
+        const names: string[] = []
+        for (const target of targets) {
+          await entry.webContentsView.webContents.session.cookies.remove(target.url, target.name)
+          names.push(target.name)
+        }
+        reply(msg.id, { ok: true, result: { removed: names.length, names } })
+        return
+      }
       default:
         throw new Error(`unknown op ${op}`)
     }
@@ -852,7 +875,7 @@ void app.whenReady().then(() => {
   rl.on('line', line => {
     const text = line.trim()
     if (text === '') return
-    let msg: { id: number; op?: string; viewId?: string; method?: string; params?: Record<string, unknown>; url?: string; savePath?: string; cookies?: unknown[]; key?: string; label?: string; task?: Record<string, unknown> }
+    let msg: { id: number; op?: string; viewId?: string; method?: string; params?: Record<string, unknown>; url?: string; savePath?: string; cookies?: unknown[]; key?: string; label?: string; task?: Record<string, unknown>; domain?: string; name?: string; all?: boolean }
     try {
       msg = JSON.parse(text) as typeof msg
     } catch {
