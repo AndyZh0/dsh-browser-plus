@@ -296,7 +296,7 @@ test('host speaks the same line-delimited JSON-RPC contract', async () => {
   // Every op the parent's RemoteElectronViewHost sends must be handled.
   for (const op of ['ping', 'createView', 'destroyView', 'showView', 'label', 'trace',
     'drainDialog', 'command', 'capture', 'download', 'flushAuth', 'restoreAuth',
-    'clearCookies', 'listWindows', 'listTasks', 'getTask', 'updateTask', 'configure', 'eval']) {
+    'clearCookies', 'listWindows', 'listTasks', 'getTask', 'updateTask', 'configure', 'eval', 'windowState']) {
     assert.match(source, new RegExp('case "' + op + '"'), 'handles op ' + op)
   }
   assert.match(source, /ReadLineAsync/)
@@ -306,6 +306,27 @@ test('host speaks the same line-delimited JSON-RPC contract', async () => {
   const program = await readHost('program')
   assert.match(program, /--rpc-port/)
   assert.match(program, /host\.CloseWindow\(\)/)
+})
+
+test('host forces its window on screen after Form.Show()', async () => {
+  const source = await readHost('browser')
+  // Defence in depth for the SW_HIDE trap: the host must not depend on the
+  // spawner getting windowsHide right. Form.Show()'s ShowWindow is the one the
+  // spawner's SW_HIDE overrides, so an explicit ShowWindow must follow it.
+  const showIndex = source.indexOf('_form.Show();')
+  const forceIndex = source.indexOf('ShowWindow(_form.Handle, SwShowNormal)')
+  assert.ok(showIndex >= 0, 'the form is shown')
+  assert.ok(forceIndex > showIndex, 'the window is forced visible AFTER Show()')
+  assert.match(source, /SetForegroundWindow\(_form\.Handle\)/)
+  assert.match(source, /IsWindowVisible\(/)
+})
+
+test('host reports whether its window is actually on screen', async () => {
+  const source = await readHost('browser')
+  assert.match(source, /internal Task<JsonObject> WindowStateAsync\(\)/)
+  assert.match(source, /\["visible"\] = handle != IntPtr\.Zero && IsWindowVisible\(handle\)/)
+  const rpc = await readHost('rpc')
+  assert.match(rpc, /case "windowState"/)
 })
 
 test('host isolates its profile from the DSH app data directory', async () => {

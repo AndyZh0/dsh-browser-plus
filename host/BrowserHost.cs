@@ -43,6 +43,15 @@ internal sealed class BrowserHost : IDisposable
     private const int DefaultHeight = 900;
     private const long MaxDownloadBytes = 256L * 1024 * 1024;
     private const int MaxTraceEntries = 500;
+    /** SW_SHOWNORMAL for the user32 ShowWindow call in StartAsync. */
+    private const int SwShowNormal = 1;
+
+    [System.Runtime.InteropServices.DllImport("user32.dll")]
+    private static extern bool ShowWindow(IntPtr hWnd, int nCmdShow);
+    [System.Runtime.InteropServices.DllImport("user32.dll")]
+    private static extern bool SetForegroundWindow(IntPtr hWnd);
+    [System.Runtime.InteropServices.DllImport("user32.dll")]
+    private static extern bool IsWindowVisible(IntPtr hWnd);
 
     private readonly Form _form;
     private readonly object _gate = new();
@@ -95,6 +104,21 @@ internal sealed class BrowserHost : IDisposable
         Console.Error.WriteLine("[dsh-browser-plus host] webview2 runtime " + _environment.BrowserVersionString
             + " userData=" + userData);
         _form.Show();
+        // Windows applies a spawner's STARTF_USESHOWWINDOW/SW_HIDE to the FIRST
+        // ShowWindow call, which Form.Show() just made — so a parent that spawns
+        // us hidden (Node's windowsHide) would leave the window created,
+        // rendering, and invisible to the human. Force it on screen explicitly
+        // so the host is robust to any spawner, and raise it once so the human
+        // actually sees the browser they are sharing.
+        try
+        {
+            ShowWindow(_form.Handle, SwShowNormal);
+            SetForegroundWindow(_form.Handle);
+        }
+        catch (Exception ex)
+        {
+            Console.Error.WriteLine("[dsh-browser-plus host] show window failed: " + ex.Message);
+        }
         Application.Idle += (_, _) => DrainUiQueue();
     }
 
@@ -163,6 +187,25 @@ internal sealed class BrowserHost : IDisposable
     private Task OnUi(Func<Task> work) => OnUi<object?>(async () => { await work(); return null; });
 
     // ---------------------------------------------------------------- views
+
+    /// <summary>
+    /// Whether the shared window is actually on screen.
+    ///
+    /// <c>Form.Visible</c> reports the WinForms flag, which stays true even when
+    /// the OS window was created hidden, so the user32 check is authoritative.
+    /// Exposed over RPC so a live test can assert the window is not invisible.
+    /// </summary>
+    internal Task<JsonObject> WindowStateAsync()
+        => OnUi(() =>
+        {
+            var handle = _form.IsHandleCreated ? _form.Handle : IntPtr.Zero;
+            return Task.FromResult(new JsonObject
+            {
+                ["visible"] = handle != IntPtr.Zero && IsWindowVisible(handle),
+                ["handle"] = handle.ToInt64(),
+                ["title"] = _form.Text,
+            });
+        });
 
     /// <summary>Create one task view; the first view for a task becomes its active tab.</summary>
     internal Task CreateViewAsync(string viewId, string taskKey, string? label)

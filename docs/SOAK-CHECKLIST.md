@@ -3,6 +3,14 @@
 > 前置:重启 DSH Web(使 provider/remote-host/tool-browser 新代码生效),然后在 DSH 会话中依次执行。
 > 每个工具调用后记录结果;任何**白屏**立即停止并回滚 `host/` 至上一提交。
 
+## 0. 窗口可见性(先做这一步)
+- [ ] `browser_open https://example.com` 后,**窗口本身出现在屏幕上**(标题
+      `dsh-browser-plus`),而不是只存在于进程里
+- [ ] `Get-Process dsh-browser-plus-host | Select MainWindowHandle` 非 0
+- [ ] 页面内容填满窗口(不是只有标题栏或一片空白)
+
+> 这一步曾经漏掉:窗口被 `SW_HIDE` 隐藏时,截图/CDP/工具全部正常,只有人眼看不到。
+
 ## 1. 对话框自动处理
 - [ ] `browser_open https://example.com`(WebView2 宿主全新启动,无白屏)
 - [ ] `browser_execute` 脚本 `setTimeout(() => { window.confirm('soak'); }, 0); 'scheduled'` → 页面不卡

@@ -106,6 +106,9 @@ internal sealed class RpcServer : IAsyncDisposable
             case "ping":
                 return null;
 
+            case "windowState":
+                return await _host.WindowStateAsync();
+
             case "createView":
             {
                 var id = viewId ?? throw new InvalidOperationException("createView missing viewId");

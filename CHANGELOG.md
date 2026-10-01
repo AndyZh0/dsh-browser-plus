@@ -1,5 +1,19 @@
 # Changelog
 
+## v0.6.1 (2026-10-01)
+
+- **修复:浏览器窗口不可见(页面隐形)**。父进程用 `windowsHide: true` 启动宿主,
+  该标志会给子进程设置 `STARTF_USESHOWWINDOW` + `SW_HIDE`;Windows 把它套用到
+  **第一次 `ShowWindow`** 调用(即 `Form.Show()`),于是窗口被创建、页面正常渲染、
+  CDP 全部可用,但人眼完全看不到——任何页面级断言都发现不了。
+  - 父进程改为 `windowsHide: false`,并导出 `HOST_SPAWN_OPTIONS` 供测试锁定。
+  - 宿主侧加固:`Form.Show()` 之后显式 `ShowWindow(SW_SHOWNORMAL)` +
+    `SetForegroundWindow`,不依赖调用方传对标志。
+  - 新增 `windowState` RPC(返回 `visible`/`handle`/`title`),由
+    `npm run smoke:webview2-host` 断言窗口真的在屏幕上。
+  - 新增回归测试:`the GUI host is spawned without SW_HIDE` 与宿主侧
+    `ShowWindow` 顺序断言。
+
 ## v0.6.0 (2026-10-01)
 
 - **Electron → WebView2**: 宿主从 Electron 子进程改为 **C# / .NET 8 WinForms

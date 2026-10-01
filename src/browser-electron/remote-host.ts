@@ -48,6 +48,23 @@ const RECOVERY_CAPTURE_SETTLE_MS = 3_000
 const HOST_EXE_NAME = 'dsh-browser-plus-host.exe'
 
 /**
+ * Spawn options for the GUI host.
+ *
+ * `windowsHide` MUST be false. It sets STARTF_USESHOWWINDOW/SW_HIDE on the
+ * child, and Windows applies that value to the FIRST ShowWindow call — which is
+ * the one `Form.Show()` makes — so the WinForms host would create its window,
+ * render the page, answer every CDP command, and never appear on screen. The
+ * page would be invisible to the human sharing it.
+ *
+ * Exported so a regression test can lock the value down: it is the exact object
+ * handed to `spawn`.
+ */
+export const HOST_SPAWN_OPTIONS: { stdio: ['ignore', 'pipe', 'pipe']; windowsHide: boolean } = {
+  stdio: ['ignore', 'pipe', 'pipe'],
+  windowsHide: false,
+}
+
+/**
  * Locate the plugin's WebView2 host executable.
  *
  * Candidates, in order: an explicit 'DSH_BROWSER_PLUS_HOST' override, the
@@ -124,11 +141,7 @@ class BrowserHostClient {
     const env: Record<string, string | undefined> = { ...process.env }
     delete env.ELECTRON_RUN_AS_NODE
     delete env.NODE_OPTIONS
-    this.child = spawn(hostPath, ['--rpc-port', String(port)], {
-      stdio: ['ignore', 'pipe', 'pipe'],
-      windowsHide: true,
-      env,
-    })
+    this.child = spawn(hostPath, ['--rpc-port', String(port)], { ...HOST_SPAWN_OPTIONS, env })
     this.child.stderr.setEncoding('utf8')
     this.child.stderr.on('data', chunk => {
       // Diagnostics only; never parse stderr as protocol.
@@ -400,6 +413,20 @@ export class RemoteElectronViewHost implements ElectronBrowserViewHost {
     // The parent owns the page chrome; hand the child the script to replay on
     // every committed navigation.
     await this.client.call('configure', { chromeScript: PAGE_CHROME_SCRIPT }, RPC_QUERY_TIMEOUT_MS)
+  }
+
+  /**
+   * Whether the host's shared window is actually on screen.
+   *
+   * Diagnostic for the SW_HIDE trap: a window created with STARTF_USESHOWWINDOW
+   * answers every RPC and renders the page while staying invisible, which no
+   * CDP-level check can detect.
+   */
+  async windowState(): Promise<{ visible: boolean; handle: number; title: string }> {
+    await this.ready()
+    const client = this.client
+    if (client === undefined) throw new Error('browser host unavailable')
+    return client.call<{ visible: boolean; handle: number; title: string }>('windowState', {}, RPC_QUERY_TIMEOUT_MS)
   }
 
   /** The child died: tear down so the next use starts a fresh child. */

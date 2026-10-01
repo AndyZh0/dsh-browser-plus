@@ -12,6 +12,15 @@ test('package declares no Electron dependency', async () => {
   assert.equal(pkg.dependencies?.electron, undefined)
 })
 
+test('the GUI host is spawned without SW_HIDE', () => {
+  // Regression: windowsHide: true sets STARTF_USESHOWWINDOW/SW_HIDE on the
+  // child, and Windows applies that to the FIRST ShowWindow call — the one
+  // Form.Show() makes. The host then created its window, rendered the page and
+  // answered every CDP command while the human saw nothing at all.
+  assert.equal(remoteHost.HOST_SPAWN_OPTIONS.windowsHide, false, 'the window must not be spawned hidden')
+  assert.deepEqual(remoteHost.HOST_SPAWN_OPTIONS.stdio, ['ignore', 'pipe', 'pipe'])
+})
+
 test('the host requirement names the Windows-only WebView2 binary', () => {
   const requirement = remoteHost.hostRequirement()
   assert.equal(requirement.platform, 'win32')

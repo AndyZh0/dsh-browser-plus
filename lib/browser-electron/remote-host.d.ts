@@ -21,6 +21,22 @@
 import type { ElectronBrowserViewHost, ElectronViewHandle } from './provider.ts';
 import type { BrowserTaskInfo, BrowserTaskUpdate, ExportedCookie } from '../browser/types.ts';
 /**
+ * Spawn options for the GUI host.
+ *
+ * `windowsHide` MUST be false. It sets STARTF_USESHOWWINDOW/SW_HIDE on the
+ * child, and Windows applies that value to the FIRST ShowWindow call — which is
+ * the one `Form.Show()` makes — so the WinForms host would create its window,
+ * render the page, answer every CDP command, and never appear on screen. The
+ * page would be invisible to the human sharing it.
+ *
+ * Exported so a regression test can lock the value down: it is the exact object
+ * handed to `spawn`.
+ */
+export declare const HOST_SPAWN_OPTIONS: {
+    stdio: ['ignore', 'pipe', 'pipe'];
+    windowsHide: boolean;
+};
+/**
  * Locate the plugin's WebView2 host executable.
  *
  * Candidates, in order: an explicit 'DSH_BROWSER_PLUS_HOST' override, the
@@ -122,6 +138,18 @@ export declare class RemoteElectronViewHost implements ElectronBrowserViewHost {
     /** Ensure the child is up and ready (lazy on first use; restarts after a crash). */
     private ready;
     private start;
+    /**
+     * Whether the host's shared window is actually on screen.
+     *
+     * Diagnostic for the SW_HIDE trap: a window created with STARTF_USESHOWWINDOW
+     * answers every RPC and renders the page while staying invisible, which no
+     * CDP-level check can detect.
+     */
+    windowState(): Promise<{
+        visible: boolean;
+        handle: number;
+        title: string;
+    }>;
     /** The child died: tear down so the next use starts a fresh child. */
     private onChildExit;
     createView(key?: string, label?: string): ElectronViewHandle;

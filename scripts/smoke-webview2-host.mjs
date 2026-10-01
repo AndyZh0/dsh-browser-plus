@@ -29,6 +29,13 @@ function withTimeout(promise, timeoutMs, label) {
 const host = new RemoteElectronViewHost(defaultHostMainPath())
 try {
   const view = host.createView('webview2-smoke', 'WebView2 Smoke')
+
+  // The window must be VISIBLE, not merely created. A host spawned with
+  // SW_HIDE answers every CDP command and renders the page while the human sees
+  // nothing, so no page-level assertion can catch it — only the OS can.
+  const windowState = await withTimeout(host.windowState(), 10_000, 'windowState')
+  assert.equal(windowState.visible, true, 'the shared browser window is on screen')
+  assert.ok(windowState.handle !== 0, 'the window has an OS handle')
   const url = 'data:text/html,<title>smoke</title><h1 id=h>hello webview2</h1><input id=i value=seed>'
 
   const navigation = await withTimeout(
