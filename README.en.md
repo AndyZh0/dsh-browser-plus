@@ -23,6 +23,9 @@ Browser automation should not disappear into a process the user cannot inspect. 
 
 ## Install
 
+Requires **DeepSeek Harness 0.2.0** (runtime line `@deepseek-ai/dsh-tools` 0.2.0-rc.2,
+`@deepseek-ai/cordis` 4.0.4); 0.1.x is not supported.
+
 ```sh
 dsh plugin --profile web add github:ParticleLight/dsh-browser-plus
 ```

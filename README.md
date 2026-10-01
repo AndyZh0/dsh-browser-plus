@@ -23,6 +23,9 @@
 
 ## 安装
 
+需要 **DeepSeek Harness 0.2.0**（运行时线 `@deepseek-ai/dsh-tools` 0.2.0-rc.2、
+`@deepseek-ai/cordis` 4.0.4）；0.1.x 不受支持。
+
 ```sh
 dsh plugin --profile web add github:ParticleLight/dsh-browser-plus
 ```

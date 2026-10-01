@@ -1,5 +1,15 @@
 # 架构说明
 
+## 运行时基线
+
+插件面向 **DeepSeek Harness 0.2.0** 运行时线构建:peer 依赖为
+`@deepseek-ai/cordis` 4.0.4、`@deepseek-ai/dsh-tools` / `dsh-llm` /
+`dsh-system-prompt` 0.2.0-rc.2、`@deepseek-ai/schemastery` 3.18.4。
+插件只使用两处框架注册面——`ctx.tools.register(defineTool(...))` 与
+`ctx.systemPrompt.section(...)`——以及自有的 `ctx.browser` seam;0.2.0 新增的
+`projectContent` 与 `ctx.ptcRuntime` 均未使用。`test/dsh-0.2.0-composition.test.mjs`
+在真实 cordis 上下文里加载 0.2.0 服务并断言 35 个工具的注册结果。
+
 ## 三层结构
 
 ```

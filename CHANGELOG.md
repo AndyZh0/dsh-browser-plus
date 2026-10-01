@@ -1,5 +1,20 @@
 # Changelog
 
+## v0.5.0 (2026-10-01)
+
+- **DSH 0.2.0 运行时**: peer 依赖迁移到 DeepSeek Harness 0.2.0 运行时线
+  (`@deepseek-ai/dsh-tools` / `dsh-llm` / `dsh-system-prompt` 0.2.0-rc.2、
+  `@deepseek-ai/cordis` 4.0.4、`@deepseek-ai/schemastery` 3.18.4)；旧的
+  0.1.x 运行时不再受支持。
+- **真实组合回归测试**: 新增 `test/dsh-0.2.0-composition.test.mjs`，在真实
+  cordis 上下文里加载 0.2.0 的 `ToolRuntime`/`SystemPrompt` 服务并挂载插件的
+  三层，断言 35 个 `browser_*` 工具的注册顺序、模型可见 schema 与
+  `tool:browser` 系统提示段。此前所有测试都伪造 `ctx`，框架 API 变化只在
+  生产暴露。
+- **无 API 变更**: 插件只使用 `ctx.browser` 自有 seam 与 `ctx.tools` /
+  `ctx.systemPrompt` 注册面；0.2.0 的 `projectContent` 与 `ctx.ptcRuntime`
+  是新增/框架内部变化，插件不受影响。
+
 ## v0.4.2 (2026-09-17)
 
 - **按站点清理 Cookie**: `browser_auth action="clear"` 支持按 `domain`(含子域)与/或 `name` 精确删除 Cookie;未限定范围时必须显式 `all: true`,避免误清全部登录态。用于清理 WAF 轮换名称留下的旧代挑战 Cookie。

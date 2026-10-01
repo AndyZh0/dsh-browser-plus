@@ -2,7 +2,10 @@
 
 ## 环境要求
 
-- DeepSeek Harness(dsh)且安装了 `web` profile
+- **DeepSeek Harness 0.2.0**(dsh)且安装了 `web` profile。插件面向 0.2.0 运行时线构建
+  (`@deepseek-ai/dsh-tools` / `dsh-llm` / `dsh-system-prompt` 0.2.0-rc.2、
+  `@deepseek-ai/cordis` 4.0.4、`@deepseek-ai/schemastery` 3.18.4);0.1.x 不受支持。
+  升级细节见[迁移指南](MIGRATION.md)。
 - **Electron 运行时**(可选 package dependency):插件固定 `42.9.3` 并优先使用自身安装的 binary；纯 `dsh web` 下找不到该版本会明确失败，避免 43.x compositor 故障。
 
 ## 安装

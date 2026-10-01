@@ -36,6 +36,29 @@ browser_auth action="restore" cookies=<步骤1保存的JSON>
 > 说明:宿主 userData 目录已从 `dsh-builtin-browser-host` 改为 `dsh-browser-plus-host`
 > (host-main.ts `app.setPath('userData', ...)`),因此 cookie 不会自动迁移,必须走一遍 export/import。
 
+## DSH 0.2.0 运行时要求
+
+v0.5.0 起，插件面向 DeepSeek Harness 0.2.0 运行时线构建：
+
+| 包 | 版本 |
+| --- | --- |
+| `@deepseek-ai/cordis` | 4.0.4 |
+| `@deepseek-ai/dsh-tools` | 0.2.0-rc.2 |
+| `@deepseek-ai/dsh-llm` | 0.2.0-rc.2 |
+| `@deepseek-ai/dsh-system-prompt` | 0.2.0-rc.2 |
+| `@deepseek-ai/schemastery` | 3.18.4 |
+
+- 0.1.x 运行时不再受支持；请先升级 DSH 桌面端 / Web 到 0.2.0。
+- 插件**不**依赖 0.2.0 新增的 `projectContent` 或 `ctx.ptcRuntime`；它只使用
+  自有的 `ctx.browser` seam 以及 `ctx.tools`、`ctx.systemPrompt` 注册面，
+  因此从 0.1.x 升级无需改动插件配置。
+- 0.2.0 桌面 shell 未提供 `electronViewHost` 服务，`cordis.patch.yml` 中的
+  `viewHost` 仍解析为 `undefined`，插件按设计自托管 Electron 子进程
+  （`host-main.js` + 本地 RPC）。这与 0.1.x 行为一致。
+- 回归保护：`test/dsh-0.2.0-composition.test.mjs` 在真实 cordis 上下文里加载
+  0.2.0 服务并断言 35 个 `browser_*` 工具与系统提示段的注册结果。升级框架前
+  先跑 `npm test`。
+
 ## 变更对使用者可见的部分
 
 - 当前共 35 个 `browser_*` 工具；除输入、文件和任务工具外，新增语义导航、滚动、快照引用、任务状态与显式人机交接。

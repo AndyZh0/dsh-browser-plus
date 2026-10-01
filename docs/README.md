@@ -9,7 +9,7 @@
 | 全部 35 个工具的参数、输出与示例 | [工具参考](tool-reference.md) |
 | 了解 seam / provider / 工具三层与自托管实现 | [架构说明](architecture.md) |
 | 重启 DSH 后的运行时验证清单 | [SOAK-CHECKLIST](SOAK-CHECKLIST.md) |
-| 切换到 dsh-browser-plus 与登录态搬运 | [迁移指南](MIGRATION.md) |
+| 切换到 dsh-browser-plus、DSH 0.2.0 运行时要求与登录态搬运 | [迁移指南](MIGRATION.md) |
 | 回到项目首页 | [README](../README.md) |
 
 ## 各篇概览
@@ -19,4 +19,4 @@
 - **[工具参考](tool-reference.md)** — 每个 `browser_*` 工具的参数、输出、守卫与示例。
 - **[架构说明](architecture.md)** — 三层结构、`ElectronBrowserViewHost` 接缝、自托管 RPC 子进程、截图通道、Electron 版本选择、共享窗口任务管理器与页面 chrome。
 - **[SOAK-CHECKLIST](SOAK-CHECKLIST.md)** — 重启 DSH 后逐项验证对话框/输入工具/等待定位/共享窗口任务管理器/稳定性(一次性通过后可放心发布)。
-- **[迁移指南](MIGRATION.md)** — 切换到 `dsh-browser-plus` 的步骤与 cookie 搬运。
+- **[迁移指南](MIGRATION.md)** — 切换到 `dsh-browser-plus` 的步骤、DSH 0.2.0 运行时要求与 cookie 搬运。
