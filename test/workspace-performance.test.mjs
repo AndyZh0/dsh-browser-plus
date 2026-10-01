@@ -2,35 +2,41 @@ import assert from 'node:assert/strict'
 import test from 'node:test'
 import { readFile } from 'node:fs/promises'
 
-const hostPath = new URL('../src/browser-electron/host-main.ts', import.meta.url)
+// Workspace state and thumbnails moved with the page chrome: the parent owns
+// the versioned bootstrap/patch vocabulary (chrome-state.ts) and the host only
+// replays the script it was configured with.
+const hostBrowserPath = new URL('../host/BrowserHost.cs', import.meta.url)
+const chromeStatePath = new URL('../src/browser-electron/chrome-state.ts', import.meta.url)
 const chromePath = new URL('../src/browser-electron/page-chrome.ts', import.meta.url)
 const remotePath = new URL('../src/browser-electron/remote-host.ts', import.meta.url)
 
-test('host emits versioned workspace bootstrap and batched patches', async () => {
-  const source = await readFile(hostPath, 'utf8')
-  assert.match(source, /createBootstrap/)
-  assert.match(source, /createPatch/)
-  assert.match(source, /chromeEpoch/)
-  assert.match(source, /chromeRevision/)
-  assert.match(source, /pendingChromeOperations/)
-  assert.match(source, /queueChromePatch/)
-  assert.match(source, /setTimeout\(flushChromePatches, 24\)/)
-  assert.match(source, /resetChromeDelivery/)
+test('chrome state keeps the versioned bootstrap and patch vocabulary', async () => {
+  const source = await readFile(chromeStatePath, 'utf8')
+  assert.match(source, /export function createBootstrap/)
+  assert.match(source, /export function createPatch/)
+  assert.match(source, /epoch/)
+  assert.match(source, /revision/)
+  assert.match(source, /ChromePatchOperation/)
 })
 
-test('host limits thumbnail capture to visible open workspace demand', async () => {
-  const source = await readFile(hostPath, 'utf8')
-  const start = source.indexOf('function scheduleVisibleTaskThumbnail')
-  const end = source.indexOf('/** Select a task', start)
-  assert.ok(start >= 0 && end > start, 'thumbnail scheduler exists')
-  const block = source.slice(start, end)
-  assert.match(block, /!workspacePanels.tasks/)
-  assert.match(block, /thumbnailCaptureInFlight/)
-  assert.match(block, /2_000/)
-  assert.match(block, /taskThumbnails.size > 32/)
-  assert.match(block, /thumbnailDirty/)
+test('the host replays parent-owned chrome instead of rebuilding workspace state', async () => {
+  const source = await readFile(hostBrowserPath, 'utf8')
+  // The host holds only the script and a visibility flag; task/trail state is
+  // parent-owned and arrives as replayed scripts.
+  assert.match(source, /private string _chromeScript = ""/)
+  assert.match(source, /internal Task ConfigureAsync/)
+  assert.match(source, /internal Task EvalAsync/)
+  assert.match(source, /core\.NavigationCompleted \+= \(_, _\) =>/)
+  assert.match(source, /InstallChrome\(viewId\)/)
+  assert.doesNotMatch(source, /taskThumbnails/, 'thumbnail capture is not host-owned')
 })
 
+test('thumbnail encoding stays bounded by the shared budget', async () => {
+  const thumbnails = await import('../lib/browser-electron/task-thumbnail.js')
+  assert.equal(thumbnails.TASK_THUMBNAIL_WIDTH, 288)
+  assert.equal(thumbnails.TASK_THUMBNAIL_JPEG_QUALITY, 58)
+  assert.equal(thumbnails.MAX_TASK_THUMBNAIL_BYTES, 180 * 1024)
+})
 
 test('remote child RPC has bounded queries and timeout-driven recovery', async () => {
   const source = await readFile(remotePath, 'utf8')
@@ -46,12 +52,12 @@ test('remote child RPC has bounded queries and timeout-driven recovery', async (
 
 test('page chrome applies patches without rebuilding all task and trail state', async () => {
   const source = await readFile(chromePath, 'utf8')
-  assert.match(source, /window.__dshChromeApply = applyChromeMessage/)
+  assert.match(source, /window\.__dshChromeApply = applyChromeMessage/)
   assert.match(source, /patchTaskRow/)
   assert.match(source, /appendTrailEntry/)
   assert.match(source, /taskPatches/)
   assert.match(source, /trailAppends/)
-  assert.match(source, /window.__dshChromeSetActive/)
+  assert.match(source, /window\.__dshChromeSetActive/)
   assert.match(source, /stopChromeTimers/)
   assert.match(source, /startChromeTimers/)
 })

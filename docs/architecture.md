@@ -2,6 +2,11 @@
 
 ## 运行时基线
 
+宿主是 **C# / .NET 8 WinForms + Microsoft Edge WebView2** 进程
+(`host/`),通过本机回环 TCP 的行分隔 JSON-RPC 由父进程驱动;页面驱动统一走
+`CoreWebView2.CallDevToolsProtocolMethodAsync`(CDP)。WebView2 为 Windows
+独占,因此插件不再是跨平台。
+
 插件面向 **DeepSeek Harness 0.2.0** 运行时线构建:peer 依赖为
 `@deepseek-ai/cordis` 4.0.4、`@deepseek-ai/dsh-tools` / `dsh-llm` /
 `dsh-system-prompt` 0.2.0-rc.2、`@deepseek-ai/schemastery` 3.18.4。
@@ -17,7 +22,7 @@ agent (browser_* 工具)
   → ctx.browser (seam, dsh-browser-plus/browser)
   → dsh-browser-plus/browser-electron (provider)
   → ElectronBrowserViewHost (由宿主外壳提供)
-  → WebContentsView + webContents.debugger (CDP)
+  → WebView2 控件 + CoreWebView2 CDP 桥
 ```
 
 ### seam 层(`src/browser/`)
@@ -36,7 +41,7 @@ agent (browser_* 工具)
 
 ### provider 层(`src/browser-electron/`)
 
-`ElectronBrowserProvider` 通过 `ElectronBrowserViewHost` 接缝操作视图,与 Electron 解耦:
+`ElectronBrowserProvider` 通过 `ElectronBrowserViewHost` 接缝操作视图,与具体浏览器运行时解耦(自托管时由 WebView2 宿主实现):
 
 - 会话 = 有序标签列表 + 历史;每次 `open()` 新建会话(工具层按任务缓存复用);
 - 每个标签对应一个视图(handle);`showActive` 让宿主把活动标签的视图置顶;
@@ -44,7 +49,7 @@ agent (browser_* 工具)
 - 每个 tab 保留最近 10 个短生命周期快照引用;`browser_click_ref` 与 `browser_scroll_into_view` 用内部 CSS 路径、元素指纹、URL 和文档代次验证目标，变化后明确要求重新快照;
 - **人类工具栏是页面注入 chrome**:通过 `Page.addScriptToEvaluateOnNewDocument` 在顶层文档挂载 closed Shadow DOM,不创建第二个 `WebContentsView`;
 - **可见性不重挂**: `showView` 只切换 `setVisible`，导航、加载、标题和 resize 路径不得执行 `removeChildView` / `addChildView`;
-- **截图优先走宿主原生 `capturePage`**(新增 `capture` 通道):CDP `captureScreenshot` 在窗口存在多个(隐藏)视图时会挂起,原生捕获对可见视图快速可靠,失败时自动回退 CDP(临时摘除其他视图保证单视图状态);
+- **截图走 CDP `Page.captureScreenshot`**:WebView2 没有原生 `capturePage`,宿主只提供这一个通道,父进程负责恢复后的合成器等待;
 - 所有 CDP 调用都有超时兜底(`withTimeout`),避免卡死工具调用;
 - 历史记录单调递增的 seq,截断(500 条)后不回绕;失败导航只记一条。
 
@@ -64,19 +69,21 @@ agent (browser_* 工具)
 没有桌面外壳时,`RemoteElectronViewHost` 接管:
 
 ```
-父进程(DSH)                        子进程(Electron main)
-RemoteElectronViewHost  ──TCP JSON-RPC──▶  host-main.js
-  resolveElectronPath()                    BrowserWindow('dsh-browser-plus')
-  ElectronChildClient                      WebContentsView × N
-  DeferredRemoteView(物化缓存)              webContents.debugger(CDP)
+父进程(DSH / Node)                    子进程(.NET WinForms)
+RemoteElectronViewHost  ──TCP JSON-RPC──▶  dsh-browser-plus-host.exe
+  resolveHostExecutable()                   Form('dsh-browser-plus')
+  BrowserHostClient                         WebView2 控件 × N
+  DeferredRemoteView(物化缓存)              CoreWebView2.CallDevToolsProtocolMethodAsync
 ```
 
-- **协议**:本机 loopback TCP,每行一个 JSON(`{ id, op, ... }` ↔ `{ id, ok, result|err }`);
-- **Electron 定位**:优先 package-local 的精确 `42.9.3` optional dependency；其次只接受经 package metadata 验证为 `42.9.3` 的 `ELECTRON_PATH`、DSH 锚点或 pnpm store 候选；找不到即失败，绝不回退到 43.x。
+- **协议**:本机 loopback TCP,每行一个 JSON(`{ id, op, ... }` ↔ `{ id, ok, result|err }`),另有宿主主动推送的 `{ event: 'page-action', viewId, payload }`;
+- **宿主定位**:依次尝试 `DSH_BROWSER_PLUS_HOST`、包内 `host/`、`host/bin/Release/net8.0-windows`、`host/publish`;非 Windows 平台直接报错说明 WebView2 为 Windows 独占,而不是 spawn ENOENT;
+- **线程模型**:`CoreWebView2` 有线程亲和性,宿主的每个 WebView2 调用都从 WinForms UI 线程发起;RPC 读取在后台线程,通过 `BeginInvoke` 编组;
+- **窗口切换**:每个任务一个 `WebView2` 控件,只有当前可见任务的控件 `Visible = true`,其余隐藏(页面继续运行);
 - **稳健性**:子进程/套接字都有 `error` 监听(否则未捕获事件会炸掉整个 DSH 进程);子进程退出自动重启;物化失败可重试;下载有 256MB 上限与 60s 超时;cookie 导出/恢复有 30s 超时;
 - **视图可见性**:所有任务键(DSH 会话)共用一个 `BrowserWindow`，每个任务有隔离视图；页面任务管理器选择可见任务，`showView` 对后台任务只更新其活动视图，不改变用户当前选择。切换仅用 `setVisible`，绝不 remove/re-add（capture 的 CDP 兜底仍只临时 detach/restore 同窗口兄弟视图）；
 - **任务状态传递**:页面首次挂载、导航重装 chrome 或任务切换时接收完整 bootstrap；常规状态、任务卡、面板和轨迹变化使用带 epoch/revision 的增量 patch。摘要中的 URL 只保留 origin，避免泄露完整路径与查询参数；
-- **任务缩略图**:缩略图使用原生 `capturePage` 生成 JPEG data URL，最长边限制为 288px、质量 58、上限 180 KiB。仅在任务面板打开时为可见任务按需捕获，单飞、最短 2 秒间隔、32 项缓存；后台任务保留最后成功图像。
+- **任务缩略图**:缩略图由父进程把 CDP 截图缩放到 JPEG data URL，最长边限制为 288px、质量 58、上限 180 KiB。仅在任务面板打开时为可见任务按需捕获，单飞、最短 2 秒间隔、32 项缓存；后台任务保留最后成功图像。
 - **孤儿防护**:父进程断开时子进程自动退出,不留僵尸窗口;
 - **cookie 落盘**:子进程使用独立 userData 目录(`<DSH_HOME>/dsh-browser-plus-host`),登录态跨重启保留(另有 `browser_auth` 手动导出/恢复/按域清理)。
 
@@ -85,10 +92,10 @@ RemoteElectronViewHost  ──TCP JSON-RPC──▶  host-main.js
 | 决策 | 原因 |
 | --- | --- |
 | 任务级会话隔离,共享 cookie | 并行任务不抢页面;登录一次到处可用 |
-| 原生 capturePage 优先,CDP 兜底 | CDP 截图多视图挂起;原生捕获窗口未激活时失败——两通道互补 |
-| 页面注入 chrome | 保留单视图合成树，避免第二个 WebContentsView 引发的人眼白屏 |
+| 截图统一走 CDP `Page.captureScreenshot` | WebView2 没有原生 `capturePage`,CDP 是唯一通道;父进程保留恢复后的合成器等待 |
+| 页面注入 chrome | 保留单视图合成树，避免第二个原生视图引发的人眼白屏 |
 | 一个共享窗口 + 页面任务管理器 | 任务视图、标签与历史隔离；`browser_space` 命名浏览器任务，后台更新不抢可见页面 |
-| 固定 Electron 42.9.3 | 43.4.1 合成器故障会导致截图/白屏；找不到 pin 时明确失败 |
+| 宿主独立于 DSH 桌面端的 Electron | WebView2 宿主是独立进程,不受桌面端 Electron 版本与其合成器故障影响 |
 | 独立 userData | 多实例争用默认目录导致 GPU 缓存/会话锁冲突 |
 | withTimeout 全覆盖 | 卡死的 CDP 调用必须能被工具超时兜底 |
 | 输出 schema 严格匹配 | DSH 运行时会校验返回值,多字段即报错 |

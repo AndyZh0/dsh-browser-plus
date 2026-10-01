@@ -197,7 +197,7 @@ export interface BrowserScreenshotResult {
   readonly path?: string
 }
 
-/** Screenshot capture options. PNG only (CDP JPEG hangs on Electron 43). */
+/** Screenshot capture options. PNG only (the CDP JPEG path is unreliable). */
 export interface BrowserScreenshotRequest {
   /** Capture the full scrollable page instead of the viewport. Default false. */
   readonly fullPage?: boolean

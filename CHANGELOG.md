@@ -1,5 +1,24 @@
 # Changelog
 
+## v0.6.0 (2026-10-01)
+
+- **Electron → WebView2**: 宿主从 Electron 子进程改为 **C# / .NET 8 WinForms
+  WebView2 宿主**(\`host/\`)。共享窗口、任务视图隔离、页面 chrome、cookie、
+  下载与 CDP 全部保留；父进程侧 \`ElectronBrowserViewHost\` 接缝不变,因此
+  provider 与 35 个 \`browser_*\` 工具无需改动。
+- **CDP 通道**: Electron 的 \`webContents.debugger\` 换成
+  \`CoreWebView2.CallDevToolsProtocolMethodAsync\`;父进程仍通过同一套
+  行分隔 JSON-RPC 驱动宿主。
+- **截图路径**: WebView2 没有原生 \`capturePage\`,截图统一走 CDP
+  \`Page.captureScreenshot\`(父进程保留恢复后的合成器等待)。
+- **平台**: WebView2 为 Windows 独占,插件不再是跨平台;非 Windows 平台在
+  解析宿主时给出明确错误而不是 spawn ENOENT。
+- **移除 Electron**: 删除 \`host-main.ts\`、\`electron\` optional dependency 与
+  electron 类型 shim;\`npm run build:host\` 构建宿主,发行包内含
+  \`host/bin/Release/net8.0-windows\`。
+- **新增实时冒烟测试**: \`npm run smoke:webview2-host\` 通过真实宿主验证
+  导航、\`Runtime.evaluate\`、\`DOM.getDocument\`、截图与 cookie。
+
 ## v0.5.0 (2026-10-01)
 
 - **DSH 0.2.0 运行时**: peer 依赖迁移到 DeepSeek Harness 0.2.0 运行时线

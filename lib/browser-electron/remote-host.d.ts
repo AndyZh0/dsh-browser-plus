@@ -1,35 +1,44 @@
 /**
- * Self-hosted Electron browser host (parent side): an
- * {@link ElectronBrowserViewHost} implementation that spawns the plugin's own
- * Electron child process (host-main.js) and drives it over line-delimited
- * JSON-RPC on a loopback TCP socket. This is what makes the plugin work on
- * surfaces without a desktop shell's electronViewHost (plain dsh web):
- * installing the plugin is enough — the browser window appears on first use.
+ * Self-hosted browser host (parent side): an {@link ElectronBrowserViewHost}
+ * implementation that spawns the plugin's own WebView2 host process
+ * (dsh-browser-plus-host.exe) and drives it over line-delimited JSON-RPC on a
+ * loopback TCP socket. This is what makes the plugin work on surfaces without a
+ * desktop shell's electronViewHost (plain dsh web): installing the plugin is
+ * enough — the browser window appears on first use.
  *
  * Protocol (one JSON object per line, both directions):
  *   -> { id, op: 'createView' } | { id, op: 'destroyView', viewId } |
- *      { id, op: 'showView', viewId } | { id, op: 'command', viewId, method, params }
+ *      { id, op: 'showView', viewId } | { id, op: 'command', viewId, method, params } |
+ *      { id, op: 'configure', chromeScript } | { id, op: 'eval', viewId, source }
  *   <- { id, ok: true, result? } | { id, ok: false, err }
  *
- * The child is Electron's main process; host-main.js owns the BrowserWindow,
- * WebContentsViews, and webContents.debugger (CDP).
+ * The child is the .NET WinForms host: it owns the shared window, the WebView2
+ * controllers, and their CoreWebView2 CDP bridge. The page chrome itself stays
+ * parent-owned: this side builds it and pushes it with 'configure', and the
+ * host replays it on every committed navigation.
  * @module dsh-browser-plus/browser-electron/remote-host
  */
 import type { ElectronBrowserViewHost, ElectronViewHandle } from './provider.ts';
 import type { BrowserTaskInfo, BrowserTaskUpdate, ExportedCookie } from '../browser/types.ts';
-/** Select the one Electron version this plugin supports; exported for behavior tests. */
-export declare function selectSupportedElectronPath(candidates: ReadonlyArray<{
-    version: string;
-    path: string;
-}>): string;
 /**
- * Line-delimited JSON-RPC client over a local TCP socket. Electron's main
- * process on Windows does not receive piped stdin, so the parent listens on a
- * loopback port and passes it to the child via `--rpc-port`; the child
- * connects back and speaks the same one-JSON-per-line protocol.
+ * Locate the plugin's WebView2 host executable.
+ *
+ * Candidates, in order: an explicit 'DSH_BROWSER_PLUS_HOST' override, the
+ * published 'host/' directory beside the package, and the .NET build output
+ * used during development.
+ *
+ * The host is a Windows-only .NET binary, so a non-Windows platform fails here
+ * with a message that names the requirement instead of a spawn ENOENT.
  */
-declare class ElectronChildClient {
-    private readonly hostMainPath;
+export declare function resolveHostExecutable(): string;
+/**
+ * Line-delimited JSON-RPC client over a local TCP socket. The parent listens on
+ * a loopback port and passes it to the child via '--rpc-port'; the child
+ * connects back and speaks the same one-JSON-per-line protocol. A Windows GUI
+ * child does not receive piped stdin, which is why the parent owns the listener.
+ */
+declare class BrowserHostClient {
+    private readonly hostPath;
     private readonly port;
     private readonly onExit?;
     private readonly child;
@@ -41,7 +50,13 @@ declare class ElectronChildClient {
     private outbox;
     /** Set once the child has exited; further calls fail fast instead of queueing. */
     private dead;
-    constructor(hostMainPath: string, port: number, onExit?: (() => void) | undefined);
+    /** Unsolicited host events (page actions) delivered to the host owner. */
+    onEvent: ((event: {
+        event: string;
+        viewId?: string;
+        payload?: string;
+    }) => void) | undefined;
+    constructor(hostPath: string, port: number, onExit?: (() => void) | undefined);
     /** Reject everything in flight, mark the client dead, and notify the host. */
     private fail;
     /** Accept the child's connection (called by the server). */
@@ -56,11 +71,11 @@ declare class ElectronChildClient {
 declare class RemoteView implements ElectronViewHandle {
     readonly id: string;
     private readonly client;
-    constructor(id: string, client: ElectronChildClient);
+    constructor(id: string, client: BrowserHostClient);
     sendCommand(method: string, params?: Record<string, unknown>): Promise<Record<string, unknown>>;
     /** Ask the child to download a URL to a local file (keeps cookies/login). */
     download(url: string, savePath: string): Promise<void>;
-    /** Native capturePage snapshot of the view (PNG base64 + size). */
+    /** CDP screenshot of the view (PNG base64 + size). */
     capture(): Promise<{
         base64: string;
         width: number;
@@ -85,19 +100,25 @@ declare class RemoteView implements ElectronViewHandle {
     label(label: string): Promise<void>;
 }
 /**
- * Self-hosted view host: spawns the plugin's Electron child on first use and
+ * Self-hosted view host: spawns the plugin's WebView2 child on first use and
  * keeps it alive until dispose(). Fallback when no desktop shell provides
  * ctx.electronViewHost.
  */
 export declare class RemoteElectronViewHost implements ElectronBrowserViewHost {
-    private readonly hostMainPath;
+    private readonly hostPath;
     private client;
     private server;
     private pendingSocket;
     private readonly views;
     private readyPromise;
     private disposed;
-    constructor(hostMainPath: string);
+    /**
+     * Page-action handler: the injected chrome reports task switches, control
+     * handoffs, and panel toggles from inside the page. The owner of workspace
+     * state subscribes here.
+     */
+    onPageAction: ((viewId: string, payload: string) => void) | undefined;
+    constructor(hostPath: string);
     /** Ensure the child is up and ready (lazy on first use; restarts after a crash). */
     private ready;
     private start;
@@ -109,6 +130,8 @@ export declare class RemoteElectronViewHost implements ElectronBrowserViewHost {
     destroyView(handle: ElectronViewHandle): void;
     /** Append one operation to the child's per-view trail. */
     trace(viewId: string, entry: unknown): void;
+    /** Run one parent-owned chrome patch inside a view. */
+    eval(viewId: string, source: string): void;
     /** List browser task keys with labels (legacy RPC name retained for compatibility). */
     listWindows(): Promise<Array<{
         key: string;
@@ -143,11 +166,11 @@ export declare class DeferredRemoteView implements ElectronViewHandle {
     /** Wait for a recovered child to acquire a paintable compositor surface. */
     private settleRecoveredCompositorForCapture;
     /**
-     * Run an operation against the materialized view, with ONE self-heal
-     * retry: if the child died while this handle was cached (host restart or a
-     * recycle), dropping the cached materialization and re-materializing
-     * creates a fresh child view for the same session handle, so a session
-     * survives a host crash/recycle without a manual reset.
+     * Run an operation against the materialized view, with ONE self-heal retry:
+     * if the child died while this handle was cached (host restart or a recycle),
+     * dropping the cached materialization and re-materializing creates a fresh
+     * child view for the same session handle, so a session survives a host
+     * crash/recycle without a manual reset.
      */
     private withView;
     sendCommand(method: string, params?: Record<string, unknown>): Promise<Record<string, unknown>>;
@@ -170,6 +193,11 @@ export declare class DeferredRemoteView implements ElectronViewHandle {
     clearDialog(): Promise<unknown>;
     label(label: string): Promise<void>;
 }
-/** Default host-main path relative to this module's build output. */
+/** Default WebView2 host executable path relative to this module's build output. */
 export declare function defaultHostMainPath(): string;
+/** The plugin's declared WebView2 host requirement, for diagnostics and tests. */
+export declare function hostRequirement(): {
+    platform: string;
+    executable: string;
+};
 export {};

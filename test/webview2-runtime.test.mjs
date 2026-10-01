@@ -5,18 +5,35 @@ import * as remoteHost from '../lib/browser-electron/remote-host.js'
 
 const packagePath = new URL('../package.json', import.meta.url)
 
-test('package supplies the supported Electron runtime', async () => {
+test('package declares no Electron dependency', async () => {
   const pkg = JSON.parse(await readFile(packagePath, 'utf8'))
-  assert.equal(pkg.optionalDependencies?.electron, '42.9.3')
+  assert.equal(pkg.optionalDependencies?.electron, undefined, 'the Electron runtime is gone')
   assert.equal(pkg.peerDependencies?.electron, undefined)
+  assert.equal(pkg.dependencies?.electron, undefined)
 })
 
-test('resolver selects only Electron 42.9.3 candidates', () => {
-  assert.equal(typeof remoteHost.selectSupportedElectronPath, 'function', 'selector is exported for behavior tests')
-  const select = remoteHost.selectSupportedElectronPath
-  assert.equal(select([{ version: '43.4.1', path: 'bad' }, { version: '42.9.3', path: 'good' }]), 'good')
-  assert.throws(() => select([{ version: '43.4.1', path: 'bad' }]), /requires Electron 42.9.3/)
-  assert.throws(() => select([]), /found: none/)
+test('the host requirement names the Windows-only WebView2 binary', () => {
+  const requirement = remoteHost.hostRequirement()
+  assert.equal(requirement.platform, 'win32')
+  assert.equal(requirement.executable, 'dsh-browser-plus-host.exe')
+})
+
+test('the host resolver refuses a non-Windows platform with a clear message', () => {
+  // The resolver is the only place that turns a platform mismatch into an
+  // actionable error instead of a spawn ENOENT.
+  assert.equal(typeof remoteHost.resolveHostExecutable, 'function')
+  if (process.platform === 'win32') {
+    // On Windows the resolver must either find the host or explain how to build
+    // it; both outcomes are acceptable in a fresh checkout.
+    try {
+      const path = remoteHost.resolveHostExecutable()
+      assert.match(path, /dsh-browser-plus-host\.exe$/)
+    } catch (error) {
+      assert.match(String(error), /build:host|DSH_BROWSER_PLUS_HOST/)
+    }
+  } else {
+    assert.throws(() => remoteHost.resolveHostExecutable(), /Windows-only/)
+  }
 })
 
 test('cookie export skips invalid domains and preserves valid URL forms', async () => {

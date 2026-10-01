@@ -6,7 +6,11 @@
   (`@deepseek-ai/dsh-tools` / `dsh-llm` / `dsh-system-prompt` 0.2.0-rc.2、
   `@deepseek-ai/cordis` 4.0.4、`@deepseek-ai/schemastery` 3.18.4);0.1.x 不受支持。
   升级细节见[迁移指南](MIGRATION.md)。
-- **Electron 运行时**(可选 package dependency):插件固定 `42.9.3` 并优先使用自身安装的 binary；纯 `dsh web` 下找不到该版本会明确失败，避免 43.x compositor 故障。
+- **Windows + Microsoft Edge WebView2 Runtime**(Evergreen):宿主是 .NET 8 WinForms
+  应用,直接使用系统安装的 WebView2 Runtime(Windows 10/11 默认随 Edge 提供)。
+- **.NET 8 桌面运行时** 或自包含发行版。发行包内含
+  `host/bin/Release/net8.0-windows`;开发环境用 `npm run build:host` 构建,
+  也可用 `DSH_BROWSER_PLUS_HOST` 指向自包含的可执行文件。
 
 ## 安装
 
@@ -23,10 +27,10 @@ dsh plugin --profile web add <本仓库路径>
 | 行 | 子路径 | 角色 |
 | --- | --- | --- |
 | `browser` | `dsh-browser-plus/browser` | `ctx.browser` 能力 seam(始终挂载) |
-| `browser-electron` | `dsh-browser-plus/browser-electron` | Electron CDP provider |
+| `browser-electron` | `dsh-browser-plus/browser-electron` | CDP provider(自托管时驱动 WebView2 宿主) |
 | `tool-browser` | `dsh-browser-plus/tool-browser` | `browser_*` 模型侧工具 |
 
-> 没有桌面外壳时插件**自托管**:自己拉起一个标题为 `dsh-browser-plus` 的 Electron 窗口,`browser_*` 工具照常可用。
+> 没有桌面外壳时插件**自托管**:自己拉起一个标题为 `dsh-browser-plus` 的 WebView2 窗口,`browser_*` 工具照常可用。
 
 ## 配置
 
@@ -84,13 +88,16 @@ dsh plugin --profile web add <本仓库路径>
 ## FAQ
 
 **Q:纯 `dsh web` 能用吗?**
-能。插件自托管:自己拉起 Electron 窗口,无需桌面外壳。
+能(Windows)。插件自托管:自己拉起 WebView2 窗口,无需桌面外壳。
 
-**Q:找不到 Electron?**
-插件只接受 Electron `42.9.3`:优先自身 optional dependency，其次校验 `ELECTRON_PATH`、DSH 锚点与 pnpm store 候选。找不到时重新安装插件依赖，或把 `ELECTRON_PATH` 指向一个经 package metadata 验证为 `42.9.3` 的 binary。
+**Q:找不到 WebView2 宿主?**
+插件依次查找 `DSH_BROWSER_PLUS_HOST`、包内 `host/`、`host/bin/Release/net8.0-windows`。
+找不到时在插件目录执行 `npm run build:host`(需要 .NET 8 SDK),或用
+`npm run publish:host` 生成自包含发行版。
 
 **Q:截图失败或挂起?**
-确认运行时是 Electron `42.9.3`，不要用 43.x。自托管截图优先走原生 `capturePage`，共享窗口内存在多个视图且目标未激活时自动兜底到 CDP。
+截图统一走 CDP `Page.captureScreenshot`。确认 WebView2 Runtime 已安装且宿主进程存活
+(`dsh-browser-plus-host.exe`);窗口被最小化时先恢复窗口再重试。
 
 **Q:浏览器窗口不见了?**
 窗口标题为 `dsh-browser-plus`(显示当前任务标签时为 `dsh-browser-plus — <名>`)；所有任务共享这一可见窗口，通过页面任务管理器切换各自隔离视图。若子进程崩溃会自动重启;重启后旧会话失效,调用 `browser_reset_session` 重建。

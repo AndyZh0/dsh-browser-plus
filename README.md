@@ -10,7 +10,7 @@
 
 浏览器自动化不应躲在用户看不见的进程里。dsh-browser-plus 把浏览器窗口留在用户眼前，同时让 agent 获得可靠的 CDP 操作能力。
 
-- **真实可见**：Electron `WebContentsView`，不是 headless relay。
+- **真实可见**：Microsoft Edge **WebView2** 原生窗口，不是 headless relay。
 - **任务隔离**：所有 DSH session 共享一个可见窗口，但各自保留隔离的任务视图、标签与历史；页面任务管理器切换可见视图，`browser_space` 命名浏览器任务。
 - **人机协作**：工具栏默认隐入页面上方，顶部中间悬停后可展开；书签、任务工作区与操作轨迹都在真实页面上运行，用户可在工具栏最右侧接管或显式交还给 Agent。
 - **玻璃工作区**：任务与操作轨迹是彼此独立的半透明玻璃面板，可同时打开；每项任务显示执行中、等待用户、用户接管、失败或空闲状态。缩略图仅在任务面板打开时为当前可见任务按需刷新，后台任务保留最后图像。
@@ -19,12 +19,15 @@
 
 - **真实输入**：键盘、鼠标、hover、双击和文件选择都走 CDP，而不是 `element.click()` 伪事件。
 - **恢复能力**：child 回收后会重新物化相同会话的视图；恢复后的首张截图等待 compositor 稳定。
-- **稳定基线**：固定 Electron 42.9.3；43.4.1 的 compositor 故障会被 resolver 拒绝。
+- **稳定基线**：宿主是独立的 .NET 8 WebView2 进程，与 DSH 桌面端的 Electron 版本解耦；截图统一走 CDP，不再依赖 Electron 合成器。
 
 ## 安装
 
 需要 **DeepSeek Harness 0.2.0**（运行时线 `@deepseek-ai/dsh-tools` 0.2.0-rc.2、
 `@deepseek-ai/cordis` 4.0.4）；0.1.x 不受支持。
+
+宿主使用 **Microsoft Edge WebView2**，因此仅支持 **Windows**（需要 Evergreen
+WebView2 Runtime 与 .NET 8 桌面运行时，或使用自包含发行版）。
 
 ```sh
 dsh plugin --profile web add github:ParticleLight/dsh-browser-plus
@@ -53,19 +56,19 @@ browser_* tools
   -> BrowserRuntime (ctx.browser seam)
   -> ElectronBrowserProvider (CDP)
   -> RemoteElectronViewHost (loopback JSON-RPC)
-  -> host-main.js (BrowserWindow + WebContentsView)
+  -> dsh-browser-plus-host.exe (WinForms + WebView2)
 ```
 
-页面 chrome 和任务管理器通过 closed Shadow DOM 注入，而不是第二个 Electron view；任务状态与轨迹以版本化增量消息同步，后台任务更新自己的隔离视图，不会抢走用户当前可见页面。
+页面 chrome 和任务管理器通过 closed Shadow DOM 注入，而不是第二个原生 view；任务状态与轨迹以版本化增量消息同步，后台任务更新自己的隔离视图，不会抢走用户当前可见页面。宿主把每个任务的页面放在独立的 `WebView2` 控件里，切换任务只改可见性，不重建、不重挂。
 
 `alert`、`confirm`、`prompt` 会自动接受，避免页面卡死；下一次页面操作会把详情记到 `browser_history` 的 `dialog` 条目。
 
 ## 可靠性规则
 
-1. 不 reparent 可见 `WebContentsView`。
-2. CDP capture 回退只临时处理同一窗口的 sibling，并保证恢复。
-3. child 恢复后，native 和 full-page capture 都只等待一次 compositor settle。
-4. 对话框、截图、动态等待和 child recovery 均有回归测试与真实 SOAK 覆盖。
+1. 不重挂可见页面视图：切换任务只切 `Visible`，绝不 remove/add。
+2. 每个 `CoreWebView2` 调用都从 UI 线程发起（WebView2 有线程亲和性）。
+3. 宿主恢复后只等待一次合成器 settle 再截图。
+4. 对话框、截图、动态等待和宿主恢复均有回归测试与真实冒烟覆盖。
 
 完整运行时检查见 [SOAK-CHECKLIST](docs/SOAK-CHECKLIST.md)。
 
@@ -75,7 +78,8 @@ browser_* tools
 npm install
 npm run build
 npm test
-npm run smoke:electron-host # 需要本地 DSH Web 已启动；验证真实 Electron Host 导航与页面交接
+npm run build:host          # 构建 C# / WebView2 宿主（需要 .NET 8 SDK）
+npm run smoke:webview2-host # 打开真实 WebView2 窗口，验证导航 / CDP / 截图 / cookie
 ```
 
 贡献方式见 [CONTRIBUTING.md](CONTRIBUTING.md)。更完整的使用说明在 [docs](docs/README.md)。

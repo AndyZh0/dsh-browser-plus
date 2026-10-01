@@ -1,7 +1,7 @@
 /**
  * Human-facing browser chrome injected into the top-level page document.
- * Keeping this UI in the page renderer avoids a second Electron
- * WebContentsView and leaves the host composition tree stable.
+ * Keeping this UI in the page renderer avoids a second native view and leaves
+ * the host composition tree stable.
  */
 export declare const PAGE_CHROME_HOST_ID = "__dsh_browser_chrome_host__";
 export declare const PAGE_CHROME_ATTRIBUTE = "data-dsh-browser-chrome";

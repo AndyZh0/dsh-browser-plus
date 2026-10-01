@@ -1,29 +1,32 @@
 /**
- * Self-hosted Electron browser host (parent side): an
- * {@link ElectronBrowserViewHost} implementation that spawns the plugin's own
- * Electron child process (host-main.js) and drives it over line-delimited
- * JSON-RPC on a loopback TCP socket. This is what makes the plugin work on
- * surfaces without a desktop shell's electronViewHost (plain dsh web):
- * installing the plugin is enough — the browser window appears on first use.
+ * Self-hosted browser host (parent side): an {@link ElectronBrowserViewHost}
+ * implementation that spawns the plugin's own WebView2 host process
+ * (dsh-browser-plus-host.exe) and drives it over line-delimited JSON-RPC on a
+ * loopback TCP socket. This is what makes the plugin work on surfaces without a
+ * desktop shell's electronViewHost (plain dsh web): installing the plugin is
+ * enough — the browser window appears on first use.
  *
  * Protocol (one JSON object per line, both directions):
  *   -> { id, op: 'createView' } | { id, op: 'destroyView', viewId } |
- *      { id, op: 'showView', viewId } | { id, op: 'command', viewId, method, params }
+ *      { id, op: 'showView', viewId } | { id, op: 'command', viewId, method, params } |
+ *      { id, op: 'configure', chromeScript } | { id, op: 'eval', viewId, source }
  *   <- { id, ok: true, result? } | { id, ok: false, err }
  *
- * The child is Electron's main process; host-main.js owns the BrowserWindow,
- * WebContentsViews, and webContents.debugger (CDP).
+ * The child is the .NET WinForms host: it owns the shared window, the WebView2
+ * controllers, and their CoreWebView2 CDP bridge. The page chrome itself stays
+ * parent-owned: this side builds it and pushes it with 'configure', and the
+ * host replays it on every committed navigation.
  * @module dsh-browser-plus/browser-electron/remote-host
  */
 
 import { spawn, type ChildProcessByStdio } from 'node:child_process'
-import { createRequire } from 'node:module'
-import { existsSync, readFileSync, readdirSync, writeFileSync } from 'node:fs'
+import { existsSync } from 'node:fs'
 import { join } from 'node:path'
 import { createServer, type Server, type Socket } from 'node:net'
 import { fileURLToPath } from 'node:url'
 import type { ElectronBrowserViewHost, ElectronViewHandle } from './provider.ts'
 import type { BrowserTaskInfo, BrowserTaskUpdate, ExportedCookie } from '../browser/types.ts'
+import { PAGE_CHROME_SCRIPT } from './page-chrome.ts'
 
 /** How long to wait for the child to signal readiness before failing. */
 const READY_TIMEOUT_MS = 20_000
@@ -36,134 +39,51 @@ const RPC_COMMAND_TIMEOUT_MS = 35_000
 const RPC_TRANSFER_TIMEOUT_MS = 120_000
 
 /**
- * A recycled Electron child can report document-ready before its compositor
- * owns a paintable surface. Delay only the first capture after self-healing.
+ * A recycled host can report document-ready before its compositor owns a
+ * paintable surface. Delay only the first capture after self-healing.
  */
 const RECOVERY_CAPTURE_SETTLE_MS = 3_000
 
-/** Electron 43.x is known to trigger compositor faults in this host. */
-const SUPPORTED_ELECTRON_VERSION = '42.9.3'
+/** The host executable's file name. WebView2 is Windows-only. */
+const HOST_EXE_NAME = 'dsh-browser-plus-host.exe'
 
 /**
- * Locate the one supported Electron binary. Candidates may come from the
- * plugin, DSH anchors, an explicit override, or pnpm stores, but only the
- * pinned version is admitted. A newer binary is not a safe substitute.
+ * Locate the plugin's WebView2 host executable.
+ *
+ * Candidates, in order: an explicit 'DSH_BROWSER_PLUS_HOST' override, the
+ * published 'host/' directory beside the package, and the .NET build output
+ * used during development.
+ *
+ * The host is a Windows-only .NET binary, so a non-Windows platform fails here
+ * with a message that names the requirement instead of a spawn ENOENT.
  */
-function resolveElectronPath(): string {
-  const require = createRequire(import.meta.url)
-  const candidates: Array<{ version: string; path: string }> = []
-  const add = (version: string | undefined, path: string | undefined): void => {
-    if (version === undefined || path === undefined) return
-    candidates.push({ version, path })
+export function resolveHostExecutable(): string {
+  if (process.platform !== 'win32') {
+    throw new Error(
+      'dsh-browser-plus requires the WebView2 host, which is Windows-only; ' +
+      'this platform (' + process.platform + ') has no WebView2 equivalent.',
+    )
   }
-  const addResolvedModule = (resolved: string): void => {
-    const packageJson = join(dirname(resolved), 'package.json')
-    add(packageVersion(packageJson) ?? versionOf(resolved), electronExeBeside(resolved))
-  }
+  const override = process.env.DSH_BROWSER_PLUS_HOST
+  if (typeof override === 'string' && override.length > 0 && existsSync(override)) return override
 
-  // Prefer the package-local optional dependency when it is installed.
-  try { addResolvedModule(require.resolve('electron')) } catch { /* continue probing */ }
-
-  // An explicit path is admitted only after its package metadata verifies 42.9.3.
-  const override = process.env.ELECTRON_PATH
-  if (typeof override === 'string' && override.length > 0 && existsSync(override)) {
-    add(versionOfElectronExecutable(override), override)
-  }
-
-  const anchors: string[] = []
-  const globalPrefix = process.env.npm_config_prefix ?? process.env.PREFIX
-  if (globalPrefix !== undefined) {
-    anchors.push(join(globalPrefix, 'node_modules'))
-    anchors.push(join(globalPrefix, 'node_modules', '@deepseek-ai', 'dsh', 'node_modules'))
-  }
-  if (process.env.DSH_HOME !== undefined) anchors.push(join(process.env.DSH_HOME, 'profiles', 'node_modules'))
-  for (const anchor of anchors) {
-    try { addResolvedModule(require.resolve('electron', { paths: [anchor] })) } catch { /* keep probing */ }
-  }
-
-  const roots = new Set<string>([
-    fileURLToPath(new URL('.', import.meta.url)),
-    process.cwd(),
-    dirname(process.execPath),
-  ])
-  for (const root of roots) {
-    let dir = root
-    for (let depth = 0; depth < 8; depth++) {
-      const store = join(dir, 'node_modules', '.pnpm')
-      if (existsSync(store)) {
-        for (const entry of readdirSync(store)) {
-          if (!entry.startsWith('electron@')) continue
-          const exe = electronDistExe(join(store, entry, 'node_modules', 'electron'))
-          add(entry.slice('electron@'.length), exe)
-        }
-      }
-      const parent = join(dir, '..')
-      if (parent === dir) break
-      dir = parent
-    }
-  }
-
-  return selectSupportedElectronPath(candidates)
-}
-
-/** Select the one Electron version this plugin supports; exported for behavior tests. */
-export function selectSupportedElectronPath(candidates: ReadonlyArray<{ version: string; path: string }>): string {
-  const supported = candidates.find(candidate => candidate.version === SUPPORTED_ELECTRON_VERSION)
-  if (supported !== undefined) return supported.path
-  const available = [...new Set(candidates.map(candidate => candidate.version))].join(', ') || 'none'
-  throw new Error(
-    'dsh-browser-plus requires Electron ' + SUPPORTED_ELECTRON_VERSION +
-    ' because Electron 43.x has a compositor fault; found: ' + available +
-    '. Install the plugin optional dependency electron@' + SUPPORTED_ELECTRON_VERSION + ' or set ELECTRON_PATH to that binary.',
-  )
-}
-
-function packageVersion(packageJson: string): string | undefined {
-  try {
-    const parsed = JSON.parse(readFileSync(packageJson, 'utf8')) as { version?: unknown }
-    return typeof parsed.version === 'string' ? parsed.version : undefined
-  } catch {
-    return undefined
-  }
-}
-
-function versionOfElectronExecutable(executable: string): string | undefined {
-  return packageVersion(join(dirname(dirname(executable)), 'package.json')) ?? versionOf(executable)
-}
-
-/** Extract an electron version like "42.9.3" from a pnpm path. */
-function versionOf(path: string): string | undefined {
-  const match = /electron@(\d+\.\d+\.\d+)/.exec(path)
-  return match?.[1]
-}
-/** From an electron package entry file, find the dist executable beside it. */
-function electronExeBeside(entry: string): string | undefined {
+  const here = fileURLToPath(new URL('.', import.meta.url))
   const candidates = [
-    join(dirname(entry), 'dist', 'electron.exe'),
-    join(dirname(entry), 'dist', 'electron'),
-    join(dirname(entry), '..', 'dist', 'electron.exe'),
-    join(dirname(entry), '..', 'dist', 'electron'),
+    // Published layout: host/ sits beside lib/ in the package.
+    join(here, '..', '..', 'host', HOST_EXE_NAME),
+    // Development: the framework-dependent build outputs.
+    join(here, '..', '..', 'host', 'bin', 'Release', 'net8.0-windows', HOST_EXE_NAME),
+    join(here, '..', '..', 'host', 'bin', 'Debug', 'net8.0-windows', HOST_EXE_NAME),
+    // Self-contained publish output.
+    join(here, '..', '..', 'host', 'publish', HOST_EXE_NAME),
   ]
   for (const candidate of candidates) {
     if (existsSync(candidate)) return candidate
   }
-  return undefined
-}
-
-/** From an electron package root, find its dist executable. */
-function electronDistExe(pkgRoot: string): string | undefined {
-  for (const candidate of [join(pkgRoot, 'dist', 'electron.exe'), join(pkgRoot, 'dist', 'electron')]) {
-    if (existsSync(candidate)) return candidate
-  }
-  return undefined
-}
-
-/** dirname without importing node:path's dirname separately. */
-function dirname(p: string): string {
-  const i = p.lastIndexOf('/')
-  const j = p.lastIndexOf('\\')
-  const k = Math.max(i, j)
-  return k < 0 ? p : p.slice(0, k)
+  throw new Error(
+    'dsh-browser-plus could not find its WebView2 host (' + HOST_EXE_NAME + '). ' +
+    'Run "npm run build:host" in the plugin, or point DSH_BROWSER_PLUS_HOST at the executable.',
+  )
 }
 
 /** One RPC round-trip with the child. */
@@ -174,12 +94,12 @@ interface Pending {
 }
 
 /**
- * Line-delimited JSON-RPC client over a local TCP socket. Electron's main
- * process on Windows does not receive piped stdin, so the parent listens on a
- * loopback port and passes it to the child via `--rpc-port`; the child
- * connects back and speaks the same one-JSON-per-line protocol.
+ * Line-delimited JSON-RPC client over a local TCP socket. The parent listens on
+ * a loopback port and passes it to the child via '--rpc-port'; the child
+ * connects back and speaks the same one-JSON-per-line protocol. A Windows GUI
+ * child does not receive piped stdin, which is why the parent owns the listener.
  */
-class ElectronChildClient {
+class BrowserHostClient {
   private readonly child: ChildProcessByStdio<null, import('node:stream').Readable, import('node:stream').Readable>
   private readonly pending = new Map<number, Pending>()
   private nextId = 1
@@ -190,37 +110,42 @@ class ElectronChildClient {
   /** Set once the child has exited; further calls fail fast instead of queueing. */
   private dead = false
 
+  /** Unsolicited host events (page actions) delivered to the host owner. */
+  onEvent: ((event: { event: string; viewId?: string; payload?: string }) => void) | undefined
+
   constructor(
-    private readonly hostMainPath: string,
+    private readonly hostPath: string,
     private readonly port: number,
     private readonly onExit?: () => void,
   ) {
-    const electron = resolveElectronPath()
-    process.stderr.write(`[dsh-browser-plus host] spawning electron: ${electron}\n`)
-    // ELECTRON_RUN_AS_NODE (even an empty string) makes Electron run as plain
-    // Node, breaking require('electron'); NODE_OPTIONS can inject flags that
-    // break the child. Rebuild the env without either.
+    process.stderr.write('[dsh-browser-plus host] spawning webview2 host: ' + hostPath + '\n')
+    // A GUI child must not inherit ELECTRON_RUN_AS_NODE or NODE_OPTIONS from a
+    // parent that happens to be Electron/Node; neither is meaningful to .NET.
     const env: Record<string, string | undefined> = { ...process.env }
     delete env.ELECTRON_RUN_AS_NODE
     delete env.NODE_OPTIONS
-    this.child = spawn(electron, [hostMainPath, '--rpc-port', String(port)], {
+    this.child = spawn(hostPath, ['--rpc-port', String(port)], {
       stdio: ['ignore', 'pipe', 'pipe'],
-      windowsHide: false,
+      windowsHide: true,
       env,
     })
     this.child.stderr.setEncoding('utf8')
     this.child.stderr.on('data', chunk => {
       // Diagnostics only; never parse stderr as protocol.
-      process.stderr.write(`[dsh-browser-plus host] ${String(chunk)}`)
+      process.stderr.write('[dsh-browser-plus host] ' + String(chunk))
     })
-    // A failed spawn (bad/corrupt binary) emits 'error' — without a listener
-    // that would crash the whole DSH process.
+    this.child.stdout.setEncoding('utf8')
+    this.child.stdout.on('data', chunk => {
+      process.stderr.write('[dsh-browser-plus host] ' + String(chunk))
+    })
+    // A failed spawn (missing/corrupt binary) emits 'error' — without a
+    // listener that would crash the whole DSH process.
     this.child.on('error', error => {
-      process.stderr.write(`[dsh-browser-plus host] spawn error: ${String(error)}\n`)
-      this.fail(new Error(`dsh-browser-plus: browser host failed to start: ${String(error)}`))
+      process.stderr.write('[dsh-browser-plus host] spawn error: ' + String(error) + '\n')
+      this.fail(new Error('dsh-browser-plus: browser host failed to start: ' + String(error)))
     })
     this.child.on('exit', (code, signal) => {
-      this.fail(new Error(`dsh-browser-plus: browser host exited (code=${String(code)} signal=${String(signal)})`))
+      this.fail(new Error('dsh-browser-plus: browser host exited (code=' + String(code) + ' signal=' + String(signal) + ')'))
     })
   }
 
@@ -244,7 +169,7 @@ class ElectronChildClient {
     // uncaught 'error' event and crashes the whole DSH process; 'close' below
     // does the cleanup.
     socket.on('error', error => {
-      process.stderr.write(`[dsh-browser-plus host] socket error: ${String(error)}\n`)
+      process.stderr.write('[dsh-browser-plus host] socket error: ' + String(error) + '\n')
     })
     socket.on('data', chunk => this.onData(chunk))
     socket.on('close', () => {
@@ -262,12 +187,12 @@ class ElectronChildClient {
 
   private onData(chunk: string | Buffer): void {
     this.buffer += typeof chunk === 'string' ? chunk : chunk.toString('utf8')
-    // Safety net: a pathological child (or a reply larger than expected)
-    // must not grow the parent's memory without bound. The child caps
-    // downloads at 256 MiB, so a healthy stream never approaches this.
+    // Safety net: a pathological child (or a reply larger than expected) must
+    // not grow the parent's memory without bound. The child caps downloads at
+    // 256 MiB, so a healthy stream never approaches this.
     if (this.buffer.length > MAX_RPC_BUFFER_BYTES) {
       this.buffer = ''
-      this.fail(new Error(`dsh-browser-plus: RPC reply exceeded ${MAX_RPC_BUFFER_BYTES} bytes`))
+      this.fail(new Error('dsh-browser-plus: RPC reply exceeded ' + MAX_RPC_BUFFER_BYTES + ' bytes'))
       return
     }
     let nl: number
@@ -282,7 +207,13 @@ class ElectronChildClient {
         // Non-protocol line; ignore.
         continue
       }
-      if (typeof msg.id !== 'number') continue
+      if (typeof msg.id !== 'number') {
+        // An unsolicited event from the host (a page action, for example).
+        if (typeof (msg as { event?: unknown }).event === 'string') {
+          this.onEvent?.(msg as { event: string; viewId?: string; payload?: string })
+        }
+        continue
+      }
       const pending = this.pending.get(msg.id)
       if (pending === undefined) continue
       this.pending.delete(msg.id)
@@ -338,7 +269,7 @@ class ElectronChildClient {
 
 /** One view in the child: its id, used for every command. */
 class RemoteView implements ElectronViewHandle {
-  constructor(readonly id: string, private readonly client: ElectronChildClient) {}
+  constructor(readonly id: string, private readonly client: BrowserHostClient) {}
 
   sendCommand(method: string, params?: Record<string, unknown>): Promise<Record<string, unknown>> {
     return this.client.call<Record<string, unknown>>('command', {
@@ -351,10 +282,11 @@ class RemoteView implements ElectronViewHandle {
   /** Ask the child to download a URL to a local file (keeps cookies/login). */
   async download(url: string, savePath: string): Promise<void> {
     const result = await this.client.call<{ base64: string }>('download', { viewId: this.id, url, savePath }, RPC_TRANSFER_TIMEOUT_MS)
+    const { writeFileSync } = await import('node:fs')
     writeFileSync(savePath, Buffer.from(result.base64, 'base64'))
   }
 
-  /** Native capturePage snapshot of the view (PNG base64 + size). */
+  /** CDP screenshot of the view (PNG base64 + size). */
   capture(): Promise<{ base64: string; width: number; height: number }> {
     return this.client.call<{ base64: string; width: number; height: number }>('capture', { viewId: this.id }, RPC_TRANSFER_TIMEOUT_MS)
   }
@@ -393,19 +325,26 @@ class RemoteView implements ElectronViewHandle {
 }
 
 /**
- * Self-hosted view host: spawns the plugin's Electron child on first use and
+ * Self-hosted view host: spawns the plugin's WebView2 child on first use and
  * keeps it alive until dispose(). Fallback when no desktop shell provides
  * ctx.electronViewHost.
  */
 export class RemoteElectronViewHost implements ElectronBrowserViewHost {
-  private client: ElectronChildClient | undefined
+  private client: BrowserHostClient | undefined
   private server: Server | undefined
   private pendingSocket: Socket | undefined
   private readonly views = new Map<string, ElectronViewHandle>()
   private readyPromise: Promise<void> | undefined
   private disposed = false
 
-  constructor(private readonly hostMainPath: string) {}
+  /**
+   * Page-action handler: the injected chrome reports task switches, control
+   * handoffs, and panel toggles from inside the page. The owner of workspace
+   * state subscribes here.
+   */
+  onPageAction: ((viewId: string, payload: string) => void) | undefined
+
+  constructor(private readonly hostPath: string) {}
 
   /** Ensure the child is up and ready (lazy on first use; restarts after a crash). */
   private ready(): Promise<void> {
@@ -441,18 +380,26 @@ export class RemoteElectronViewHost implements ElectronBrowserViewHost {
     // A later server error (rare on a loopback ephemeral port) must not crash
     // the process; the client's fail path handles the actual recovery.
     server.on('error', error => {
-      process.stderr.write(`[dsh-browser-plus host] rpc server error: ${String(error)}\n`)
+      process.stderr.write('[dsh-browser-plus host] rpc server error: ' + String(error) + '\n')
     })
     const address = server.address()
     const port = typeof address === 'object' && address !== null ? address.port : 0
     this.server = server
-    this.client = new ElectronChildClient(this.hostMainPath, port, () => this.onChildExit())
+    this.client = new BrowserHostClient(this.hostPath, port, () => this.onChildExit())
+    this.client.onEvent = event => {
+      if (event.event === 'page-action' && event.viewId !== undefined && event.payload !== undefined) {
+        this.onPageAction?.(event.viewId, event.payload)
+      }
+    }
     if (this.pendingSocket !== undefined) {
       this.client.attach(this.pendingSocket)
       this.pendingSocket = undefined
     }
     // Wait for the child's connection + readiness ping.
     await withTimeout(this.client.call('ping', {}, RPC_QUERY_TIMEOUT_MS), READY_TIMEOUT_MS, 'browser host did not become ready')
+    // The parent owns the page chrome; hand the child the script to replay on
+    // every committed navigation.
+    await this.client.call('configure', { chromeScript: PAGE_CHROME_SCRIPT }, RPC_QUERY_TIMEOUT_MS)
   }
 
   /** The child died: tear down so the next use starts a fresh child. */
@@ -470,7 +417,7 @@ export class RemoteElectronViewHost implements ElectronBrowserViewHost {
   createView(key?: string, label?: string): ElectronViewHandle {
     // The seam is synchronous; the provider uses the handle immediately, so
     // commands are deferred until the child is up and the view materialized.
-    const id = `view:${Math.random().toString(36).slice(2, 10)}`
+    const id = 'view:' + Math.random().toString(36).slice(2, 10)
     const view = new DeferredRemoteView(id, label, currentLabel => this.ensureView(id, key, currentLabel))
     this.views.set(id, view)
     return view
@@ -485,8 +432,8 @@ export class RemoteElectronViewHost implements ElectronBrowserViewHost {
       ...key !== undefined ? { key } : {},
       ...label !== undefined ? { label } : {},
     })
-    // If the view was destroyed while the createView RPC was in flight, do
-    // not re-insert a stale entry that would resurrect a dead child view.
+    // If the view was destroyed while the createView RPC was in flight, do not
+    // re-insert a stale entry that would resurrect a dead child view.
     if (this.views.get(id) === undefined) {
       throw new Error('browser: view destroyed while starting')
     }
@@ -511,10 +458,18 @@ export class RemoteElectronViewHost implements ElectronBrowserViewHost {
       .then(() => this.client?.call('destroyView', { viewId: handle.id }))
       .catch(() => { /* child already gone */ })
   }
+
   /** Append one operation to the child's per-view trail. */
   trace(viewId: string, entry: unknown): void {
     void this.ready()
       .then(() => this.client?.call('trace', { viewId, entry }))
+      .catch(() => { /* child gone */ })
+  }
+
+  /** Run one parent-owned chrome patch inside a view. */
+  eval(viewId: string, source: string): void {
+    void this.ready()
+      .then(() => this.client?.call('eval', { viewId, source }, RPC_QUERY_TIMEOUT_MS))
       .catch(() => { /* child gone */ })
   }
 
@@ -618,11 +573,11 @@ export class DeferredRemoteView implements ElectronViewHandle {
   }
 
   /**
-   * Run an operation against the materialized view, with ONE self-heal
-   * retry: if the child died while this handle was cached (host restart or a
-   * recycle), dropping the cached materialization and re-materializing
-   * creates a fresh child view for the same session handle, so a session
-   * survives a host crash/recycle without a manual reset.
+   * Run an operation against the materialized view, with ONE self-heal retry:
+   * if the child died while this handle was cached (host restart or a recycle),
+   * dropping the cached materialization and re-materializing creates a fresh
+   * child view for the same session handle, so a session survives a host
+   * crash/recycle without a manual reset.
    */
   private async withView<T>(
     run: (view: RemoteView) => Promise<T>,
@@ -690,7 +645,7 @@ export class DeferredRemoteView implements ElectronViewHandle {
 /** Reject a promise if it does not settle within the budget. */
 function withTimeout<T>(promise: Promise<T>, ms: number, message: string): Promise<T> {
   return new Promise<T>((resolve, reject) => {
-    const timer = setTimeout(() => reject(new Error(`${message} (${ms}ms)`)), ms)
+    const timer = setTimeout(() => reject(new Error(message + ' (' + ms + 'ms)')), ms)
     promise.then(
       value => { clearTimeout(timer); resolve(value) },
       error => { clearTimeout(timer); reject(error) },
@@ -698,7 +653,12 @@ function withTimeout<T>(promise: Promise<T>, ms: number, message: string): Promi
   })
 }
 
-/** Default host-main path relative to this module's build output. */
+/** Default WebView2 host executable path relative to this module's build output. */
 export function defaultHostMainPath(): string {
-  return fileURLToPath(new URL('./host-main.js', import.meta.url))
+  return resolveHostExecutable()
+}
+
+/** The plugin's declared WebView2 host requirement, for diagnostics and tests. */
+export function hostRequirement(): { platform: string; executable: string } {
+  return { platform: 'win32', executable: HOST_EXE_NAME }
 }

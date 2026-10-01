@@ -17,7 +17,7 @@ export interface ExportedAuthCookie {
     readonly httpOnly: boolean;
     readonly expirationDate: number | undefined;
 }
-/** Convert Electron cookies into portable auth records, skipping invalid domains. */
+/** Convert host cookies into portable auth records, skipping invalid domains. */
 export declare function exportCookiesForAuth(cookies: readonly AuthCookieLike[]): ExportedAuthCookie[];
 /**
  * One cookie selected for removal, plus the URL Electron needs to delete it.

@@ -2,3 +2,13 @@ node_modules/
 .superpowers/
 *.log
 *.tgz
+
+# .NET build output for the WebView2 host.
+#
+# host/bin/Release/net8.0-windows IS tracked, exactly like lib/: a
+# github: install fetches the repository tree, so a gitignored host binary
+# would leave the plugin unable to start its browser window. Intermediate
+# output and self-contained publishes are not tracked.
+host/obj/
+host/publish/
+host/bin/Debug/

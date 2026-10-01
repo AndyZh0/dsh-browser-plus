@@ -41,11 +41,11 @@ test('icon resolver selects platform assets', async () => {
   assert.equal(icon.resolveBrowserIconPath('win32').includes('assets'), true)
 })
 
-test('host passes resolved icon to BrowserWindow', async () => {
-  const source = await readFile(new URL('../src/browser-electron/host-main.ts', import.meta.url), 'utf8')
-  assert.match(source, /resolveBrowserIconPath/)
-  assert.match(source, /icon/)
-  assert.match(source, /dock/)
+test('host loads the packaged icon for its window', async () => {
+  const source = await readFile(new URL('../host/BrowserHost.cs', import.meta.url), 'utf8')
+  assert.match(source, /private static Icon\? LoadIcon/)
+  assert.match(source, /dsh-browser-plus\.ico/)
+  assert.match(source, /Icon = LoadIcon()/)
 })
 
 test('icon resolver handles unknown platform and missing derivative safely', async () => {

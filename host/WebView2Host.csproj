@@ -1,0 +1,40 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <!--
+    dsh-browser-plus WebView2 host.
+
+    This replaces the Electron main process (host-main.ts). It is spawned by
+    RemoteElectronViewHost exactly like the Electron child was: the parent
+    listens on an ephemeral loopback port, passes the rpc port flag, and the host
+    connects back and speaks one JSON object per line.
+
+    Framework-dependent on net8.0-windows: the WebView2 Runtime is a machine
+    prerequisite (Evergreen), and the .NET 8 WindowsDesktop runtime is required
+    at run time. A self-contained publish (dotnet publish with the
+    self-contained flag) produces a dependency-free build for distribution.
+  -->
+  <PropertyGroup>
+    <OutputType>WinExe</OutputType>
+    <TargetFramework>net8.0-windows</TargetFramework>
+    <UseWindowsForms>true</UseWindowsForms>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <AssemblyName>dsh-browser-plus-host</AssemblyName>
+    <RootNamespace>DshBrowserPlusHost</RootNamespace>
+    <LangVersion>12</LangVersion>
+    <SatelliteResourceLanguages>en</SatelliteResourceLanguages>
+    <!-- The WPF assembly of the WebView2 package drags a WindowsBase version
+         conflict warning in; it is never referenced by this WinForms host. -->
+    <NoWarn>$(NoWarn);MSB3277</NoWarn>
+    <!-- Do not copy the NuGet XML documentation or symbols next to the host:
+         they are never read at run time and would add ~800 KiB to the package.
+         The WebView2 native loader DLLs under runtimes/ are still copied. -->
+    <AllowedReferenceRelatedFileExtensions>none</AllowedReferenceRelatedFileExtensions>
+    <DebugType>none</DebugType>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <PackageReference Include="Microsoft.Web.WebView2" Version="1.0.2903.40" />
+  </ItemGroup>
+
+</Project>

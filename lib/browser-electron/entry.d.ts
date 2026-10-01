@@ -1,12 +1,13 @@
 /**
- * Electron browser provider plugin entry: registers the Electron-backed
- * `BrowserProvider` with `ctx.browser`. The provider needs a view host (real
- * Electron `WebContentsView` objects). When a desktop shell supplies
- * `ctx.electronViewHost`, that host is used (embedded, human-machine shared
- * view). Otherwise the plugin self-hosts: it spawns its own Electron child
- * (`host-main.js`) and drives it over a local TCP JSON-RPC socket, so
- * installing the plugin is enough for `browser_*` tools to work on any
- * surface.
+ * Browser provider plugin entry: registers the CDP-backed `BrowserProvider`
+ * with `ctx.browser`. The provider needs a view host (real page surfaces).
+ * When a desktop shell supplies `ctx.electronViewHost`, that host is used
+ * (embedded, human-machine shared view). Otherwise the plugin self-hosts: it
+ * spawns its own WebView2 host process (`dsh-browser-plus-host.exe`, a .NET
+ * WinForms app) and drives it over a local TCP JSON-RPC socket, so installing
+ * the plugin is enough for `browser_*` tools to work on any surface.
+ *
+ * The host runs Microsoft Edge WebView2, so this capability is Windows-only.
  * @module dsh-browser-plus/browser-electron
  */
 import type { Context } from '@deepseek-ai/cordis';
@@ -28,7 +29,7 @@ export interface Config {
     readonly httpOnly?: boolean;
 }
 export declare const Config: z<Config>;
-/** Register the Electron browser provider with `ctx.browser`. */
+/** Register the CDP browser provider with `ctx.browser`. */
 export declare function apply(ctx: Context & {
     browser: BrowserRuntime;
 }, config: Config): void;

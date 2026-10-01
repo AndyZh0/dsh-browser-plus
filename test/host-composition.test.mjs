@@ -2,30 +2,42 @@ import test from 'node:test'
 import assert from 'node:assert/strict'
 import { readFile } from 'node:fs/promises'
 
-const hostPath = new URL('../lib/browser-electron/host-main.js', import.meta.url)
+// The host moved from Electron (lib/browser-electron/host-main.js) to a .NET
+// WinForms WebView2 process (host/*.cs). The wire order and the shared-window
+// invariants are the same; these assertions now read the C# sources.
+const hostSources = {
+  browser: new URL('../host/BrowserHost.cs', import.meta.url),
+  rpc: new URL('../host/RpcServer.cs', import.meta.url),
+  cookies: new URL('../host/CookieAuth.cs', import.meta.url),
+  program: new URL('../host/Program.cs', import.meta.url),
+}
 const providerPath = new URL('../lib/browser-electron/provider.js', import.meta.url)
 const providerSourcePath = new URL('../src/browser-electron/provider.ts', import.meta.url)
 const remotePath = new URL('../lib/browser-electron/remote-host.js', import.meta.url)
 const runtimePath = new URL('../lib/browser/runtime.js', import.meta.url)
 const typesPath = new URL('../lib/browser/types.d.ts', import.meta.url)
 
+const readHost = (key) => readFile(hostSources[key], 'utf8')
+
 test('showView changes visibility without reparenting a page view', async () => {
-  const source = await readFile(hostPath, 'utf8')
-  const start = source.indexOf("case 'showView'")
-  const end = source.indexOf("case 'command'", start)
-  assert.ok(start >= 0 && end > start, 'showView block exists')
-  const showBlock = source.slice(start, end)
-  assert.doesNotMatch(showBlock, /removeChildView/)
-  assert.doesNotMatch(showBlock, /addChildView/)
+  const source = await readHost('browser')
+  const start = source.indexOf('internal Task ShowViewAsync')
+  const end = source.indexOf('/// <summary>Set a task', start)
+  assert.ok(start >= 0 && end > start, 'ShowViewAsync exists')
+  const block = source.slice(start, end)
+  assert.match(block, /SyncVisibility\(\)/)
+  // Visibility is a property toggle on a persistent control; a view is never
+  // re-added to a different parent.
+  const sync = source.slice(source.indexOf('private void SyncVisibility'), source.indexOf('// ------------------------------------------------------------- commands'))
+  assert.match(sync, /entry\.Control\.Visible = active/)
+  assert.doesNotMatch(sync, /Controls\.Remove/)
 })
 
-test('host installs page chrome before creating the visible page surface', async () => {
-  const source = await readFile(hostPath, 'utf8')
-  assert.match(source, /buildPageChromeScript/)
-  assert.ok(source.includes('executeJavaScript('), 'uses native executeJavaScript')
-  assert.ok(source.includes('__dshTrail'), 'injects trail with chrome')
-  assert.ok(source.includes("on('did-navigate'"), 'reapplies on navigation')
-  assert.match(source, /void installPageChrome\(view, viewId\)/)
+test('host creates the page surface through the WebView2 controller', async () => {
+  const source = await readHost('browser')
+  assert.match(source, /EnsureCoreWebView2Async\(_environment\)/)
+  assert.match(source, /new WebView2 \{ Dock = DockStyle\.None, Visible = false \}/)
+  assert.match(source, /AddScriptToExecuteOnDocumentCreatedAsync\(BindingScript\(\)\)/)
 })
 
 test('snapshots expose user-control state', async () => {
@@ -35,16 +47,19 @@ test('snapshots expose user-control state', async () => {
 })
 
 test('host keeps popup navigation inside the shared view', async () => {
-  const source = await readFile(hostPath, 'utf8')
-  assert.match(source, /setWindowOpenHandler/)
-  assert.match(source, /action: 'deny'/)
+  const source = await readHost('browser')
+  assert.match(source, /NewWindowRequested/)
+  assert.match(source, /e\.Handled = true/)
+  assert.match(source, /UriSchemeHttp/)
+  assert.match(source, /UriSchemeHttps/)
 })
 
-test('host records trace ops and injects the trail into chrome', async () => {
-  const source = await readFile(hostPath, 'utf8')
-  assert.match(source, /case 'trace'/)
-  assert.match(source, /__dshTrail/)
-  assert.match(source, /traces/)
+test('host records trace ops', async () => {
+  const source = await readHost('browser')
+  assert.match(source, /internal void AppendTrace/)
+  assert.match(source, /MaxTraceEntries = 500/)
+  const rpc = await readHost('rpc')
+  assert.match(rpc, /case "trace"/)
 })
 
 test('provider forwards each record as a host trace', async () => {
@@ -54,7 +69,7 @@ test('provider forwards each record as a host trace', async () => {
 
 test('remote host forwards trace to the child', async () => {
   const source = await readFile(remotePath, 'utf8')
-  assert.ok(source.includes("call('trace'"), 'forwards trace op')
+  assert.match(source, /call\('trace'/)
 })
 
 test('model-facing snapshots ignore injected chrome controls', async () => {
@@ -75,14 +90,16 @@ test('provider retains document-ready waiting and SPA empty-snapshot retry', asy
   assert.match(source, /attempt < 5/)
   assert.match(source, /readiness wait exceeded/)
 })
+
 test('host auto-accepts JS dialogs and exposes drainDialog', async () => {
-  const source = await readFile(hostPath, 'utf8')
-  assert.ok(source.includes("'Page.enable'"), 'enables Page domain')
-  assert.ok(source.includes("'DOM.enable'"), 'enables DOM domain')
-  assert.match(source, /Page\.javascriptDialogOpening/)
-  assert.match(source, /Page\.handleJavaScriptDialog/)
-  assert.match(source, /dialogLogs/)
-  assert.match(source, /case 'drainDialog'/)
+  const source = await readHost('browser')
+  // WebView2 surfaces the dialog natively, so no CDP Page.enable is needed.
+  assert.match(source, /ScriptDialogOpening/)
+  assert.match(source, /e\.Accept\(\)/)
+  assert.match(source, /entry\.DialogLog = new JsonObject/)
+  assert.match(source, /internal JsonNode\? DrainDialog/)
+  const rpc = await readHost('rpc')
+  assert.match(rpc, /case "drainDialog"/)
 })
 
 test('provider drains auto-accepted dialogs into history', async () => {
@@ -92,7 +109,7 @@ test('provider drains auto-accepted dialogs into history', async () => {
 })
 
 test('snapshots emit a targeted locator per element', async () => {
-  const source = await readFile(providerPath, 'utf8')
+  const source = await readFile(providerSourcePath, 'utf8')
   assert.match(source, /const locatorOf = /)
   assert.match(source, /CSS\.escape/)
   assert.match(source, /\[aria-label=|\(aria-label\)/)
@@ -100,67 +117,60 @@ test('snapshots emit a targeted locator per element', async () => {
 })
 
 test('host uses one shared window with task-keyed views', async () => {
-  const source = await readFile(hostPath, 'utf8')
-  assert.match(source, /let window;/)
-  assert.match(source, /function ensureWindow\(/)
-  assert.match(source, /views\.set\(viewId, \{ webContentsView: view, taskKey \}\)/)
-  assert.match(source, /taskLabels/)
-  assert.match(source, /activeViewByTask/)
-  assert.match(source, /visibleTaskKey/)
-  assert.ok(!source.includes('windowsByKey'), 'per-task native windows removed')
-  assert.ok(!source.includes('function windowFor'), 'no window factory by task key')
+  const source = await readHost('browser')
+  assert.match(source, /private readonly Form _form/)
+  assert.match(source, /_views\[viewId\] = entry/)
+  assert.match(source, /internal required string TaskKey/)
+  assert.match(source, /_taskLabels/)
+  assert.match(source, /_activeViewByTask/)
+  assert.match(source, /_visibleTaskKey/)
+  assert.doesNotMatch(source, /windowsByKey/, 'per-task native windows are gone')
 })
 
 test('switchVisibleTask changes visibility without reparenting views', async () => {
-  const source = await readFile(hostPath, 'utf8')
-  const start = source.indexOf('function switchVisibleTask')
-  assert.ok(start >= 0, 'switchVisibleTask exists')
-  const block = source.slice(start, start + 1800)
-  assert.match(block, /syncVisibleTaskVisibility\(\)/)
-  const helperStart = source.indexOf('function syncVisibleTaskVisibility')
-  const helper = source.slice(helperStart, helperStart + 1200)
-  assert.match(helper, /setVisible\(false\)/)
-  assert.match(helper, /setVisible\(true\)/)
-  assert.doesNotMatch(helper, /addChildView/)
-  assert.doesNotMatch(helper, /removeChildView/)
+  const source = await readHost('browser')
+  const start = source.indexOf('private void SyncVisibility')
+  assert.ok(start >= 0, 'SyncVisibility exists')
+  const block = source.slice(start, start + 1200)
+  assert.match(block, /entry\.Control\.Visible = active/)
+  assert.match(block, /entry\.Control\.BringToFront\(\)/)
+  assert.doesNotMatch(block, /Controls\.Remove/)
+  assert.doesNotMatch(block, /Controls\.Add/)
 })
 
 test('provider opens with a window key and label through the host seam', async () => {
-  const source = await readFile(providerPath, 'utf8')
+  const source = await readFile(providerSourcePath, 'utf8')
   assert.match(source, /const taskKey = options\?\.key \?\? 'default'/)
   assert.match(source, /createView\(taskKey, taskLabel/)
 })
 
-test('capture fallback handles sibling views in the shared window', async () => {
-  const source = await readFile(hostPath, 'utf8')
-  const start = source.indexOf("case 'capture'")
-  const end = source.indexOf("case 'download'", start)
-  assert.ok(start >= 0 && end > start, 'capture block exists')
-  const captureBlock = source.slice(start, end)
-  assert.match(captureBlock, /filter\(v => v !== entry\)/)
-  assert.match(captureBlock, /syncVisibleTaskVisibility\(\)/)
-  assert.doesNotMatch(captureBlock, /v\.window === entry\.window/)
+test('capture goes through the CDP screenshot path', async () => {
+  const source = await readHost('browser')
+  const start = source.indexOf('internal Task<JsonObject> CaptureAsync')
+  const end = source.indexOf('/// <summary>', start)
+  assert.ok(start >= 0 && end > start, 'CaptureAsync exists')
+  const block = source.slice(start, end)
+  // WebView2 has no native capturePage, so CDP is the only path.
+  assert.match(block, /CallDevToolsProtocolMethodAsync\("Page\.captureScreenshot"/)
+  assert.match(block, /capture produced no image/)
 })
 
 test('hidden task showView keeps the user-selected task visible', async () => {
-  const source = await readFile(hostPath, 'utf8')
-  const start = source.indexOf("case 'showView'")
-  const end = source.indexOf("case 'label'", start)
-  assert.ok(start >= 0 && end > start, 'showView block exists')
-  const showBlock = source.slice(start, end)
-  assert.match(showBlock, /activeViewByTask\.set/)
-  assert.match(showBlock, /entry\.taskKey !== visibleTaskKey/)
-  assert.match(showBlock, /reply\(msg\.id, \{ ok: true \}\)/)
+  const source = await readHost('browser')
+  const start = source.indexOf('internal Task ShowViewAsync')
+  const end = source.indexOf('/// <summary>Set a task', start)
+  const block = source.slice(start, end)
+  assert.match(block, /_activeViewByTask\[entry\.TaskKey\] = viewId/)
+  assert.match(block, /_visibleTaskKey \?\?= entry\.TaskKey/)
 })
 
 test('remote host forwards createView key/label and window ops', async () => {
   const source = await readFile(remotePath, 'utf8')
-  assert.ok(source.includes("call('createView'"), 'creates views')
+  assert.match(source, /call\('createView'/)
   assert.match(source, /\.\.\.key !== undefined/)
-  assert.ok(source.includes("call('label'"), 'labels windows')
-  assert.ok(source.includes("call('listWindows'"), 'lists windows')
+  assert.match(source, /call\('label'/)
+  assert.match(source, /call\('listWindows'/)
 })
-
 
 test('recovered remote views settle the compositor before capture operations', async () => {
   const source = await readFile(remotePath, 'utf8')
@@ -180,32 +190,58 @@ test('recovered remote views settle the compositor before capture operations', a
   assert.match(commandBlock, /settleRecoveredCompositorForCapture/)
 })
 
-test('host binds page task actions and pushes safe task state', async () => {
-  const source = await readFile(hostPath, 'utf8')
-  assert.match(source, /void view\.webContents\.debugger\.sendCommand\('Page\.enable'\)/)
-  assert.match(source, /void view\.webContents\.debugger\.sendCommand\('DOM\.enable'\)/)
-  assert.match(source, /void view\.webContents\.debugger\.sendCommand\('Runtime\.addBinding'/)
-  const listenerIndex = source.indexOf("debugger.on('message'")
-  const bindingIndex = source.indexOf("void view.webContents.debugger.sendCommand('Runtime.addBinding'")
-  assert.ok(listenerIndex >= 0 && listenerIndex < bindingIndex, 'install the message listener before registering the binding')
-  assert.doesNotMatch(source, /await view\.webContents\.debugger\.sendCommand\('Runtime\.enable'\)/)
+test('host installs the page task binding before any document runs', async () => {
+  const source = await readHost('browser')
+  assert.match(source, /BindingScript\(\)/)
   assert.match(source, /__dshBrowserTaskAction/)
-  assert.match(source, /Runtime\.bindingCalled/)
-  assert.match(source, /function taskSummaries/)
-  assert.match(source, /window\.__dshTasks/)
-  assert.match(source, /switchVisibleTask\(taskKey\)/)
-  assert.match(source, /function summarizeLatestTrace/)
-  assert.match(source, /latest: latest/)
-  assert.match(source, /typeof record\.at === 'number'/)
-  assert.match(source, /JSON\.parse\(binding\.payload\)/)
-  assert.match(source, /activeViewByTask\.has\(action\.taskKey\)/)
-  const summaryStart = source.indexOf('function taskSummaries')
-  const summaryEnd = source.indexOf('function activeTraceForTask', summaryStart)
-  const summaryBlock = source.slice(summaryStart, summaryEnd)
-  assert.doesNotMatch(summaryBlock, /params/)
-  assert.doesNotMatch(source, /latest: list\.at\(-1\)/)
-  assert.match(source, /createBootstrap/)
-  assert.match(source, /createPatch/)
+  assert.match(source, /chrome\.webview\.postMessage/)
+  // The binding must be registered as a document-created script, not injected
+  // after the fact, so it exists before page scripts run.
+  assert.match(source, /AddScriptToExecuteOnDocumentCreatedAsync\(BindingScript\(\)\)/)
+})
+
+test('host pushes safe task state and redacts summary URLs', async () => {
+  const source = await readHost('browser')
+  assert.match(source, /private JsonObject\? Summarize/)
+  assert.match(source, /TaskSummaryUrl/)
+  const start = source.indexOf('private JsonObject? Summarize')
+  const end = source.indexOf('private static string SafeUrl', start)
+  assert.ok(start >= 0 && end > start, 'summary block exists')
+  assert.match(source.slice(start, end), /\["url"\] = TaskSummaryUrl\(/)
+  // Only origin is exposed; a full path/query never reaches the page.
+  const urlStart = source.indexOf('internal static string TaskSummaryUrl')
+  const urlBlock = source.slice(urlStart, urlStart + 500)
+  assert.match(urlBlock, /GetLeftPart\(UriPartial\.Authority\)/)
+})
+
+test('host replays the parent-owned chrome on every committed navigation', async () => {
+  const source = await readHost('browser')
+  // The handler caches the committed URL and replays the chrome.
+  assert.match(source, /core\.NavigationCompleted \+= \(_, _\) =>/)
+  assert.match(source, /entry\.Url = SafeUrl\(core\)/)
+  assert.match(source, /InstallChrome\(viewId\)/)
+  assert.match(source, /internal Task ConfigureAsync/)
+  assert.match(source, /window\.__dshChromeSetActive/)
+  const rpc = await readHost('rpc')
+  assert.match(rpc, /case "configure"/)
+  assert.match(rpc, /case "eval"/)
+})
+
+test('host applies the configured chrome only when the parent supplied one', async () => {
+  const source = await readHost('browser')
+  const start = source.indexOf('private async Task InstallChromeAsync')
+  assert.ok(start >= 0, 'InstallChromeAsync exists')
+  const block = source.slice(start, start + 700)
+  assert.match(block, /if \(_chromeScript\.Length == 0\) return/)
+})
+
+test('host clears view state when the shared window closes', async () => {
+  const source = await readHost('browser')
+  const start = source.indexOf('_form.FormClosed')
+  assert.ok(start >= 0, 'FormClosed handler exists')
+  const block = source.slice(start, start + 600)
+  assert.match(block, /_views\.Clear\(\)/)
+  assert.match(block, /_visibleTaskKey = null/)
 })
 
 test('browser_space is documented as a task label, not a separate window', async () => {
@@ -233,68 +269,47 @@ test('deferred views retain the latest task label for child recovery', async () 
   const source = await readFile(remotePath, 'utf8')
   assert.match(source, /taskLabel;/)
   assert.match(source, /this\.materialize\(this\.taskLabel\)/)
-  assert.match(source, /this.taskLabel = label/)
+  assert.match(source, /this\.taskLabel = label/)
   assert.match(source, /this\.withView\(view => view\.label\(label\)\)/)
 })
 
-test('task summaries redact paths and query strings before page injection', async () => {
-  const source = await readFile(hostPath, 'utf8')
-  assert.match(source, /taskSummaryUrl/)
-  const start = source.indexOf('function taskSummaries')
-  const end = source.indexOf('function activeTraceForTask', start)
-  assert.ok(start >= 0 && end > start, 'task summary block exists')
-  assert.match(source.slice(start, end), /url: taskSummaryUrl\(url\)/)
+test('cookie clear refuses an unscoped wipe in the host', async () => {
+  const source = await readHost('cookies')
+  assert.match(source, /SelectForClear/)
+  assert.match(source, /pass all: true to remove every cookie/)
+  assert.match(source, /MatchesDomain/)
 })
 
-test('host synchronizes selected task trace with chrome state', async () => {
-  const source = await readFile(hostPath, 'utf8')
-  assert.match(source, /function activeTraceForTask/)
-  assert.match(source, /window\.__dshTrail =/)
-  const switchStart = source.indexOf('function switchVisibleTask')
-  const switchBlock = source.slice(switchStart, switchStart + 2200)
-  assert.match(switchBlock, /pushVisibleChromeState\(\)/)
+test('host exports and restores cookies through the WebView2 cookie manager', async () => {
+  const source = await readHost('browser')
+  assert.match(source, /CookieManager\.GetCookiesAsync/)
+  assert.match(source, /CookieAuth\.Export/)
+  assert.match(source, /CookieAuth\.RestoreOne/)
+  const rpc = await readHost('rpc')
+  assert.match(rpc, /case "flushAuth"/)
+  assert.match(rpc, /case "restoreAuth"/)
+  assert.match(rpc, /case "clearCookies"/)
 })
 
-test('host captures thumbnails only for the visible task', async () => {
-  const source = await readFile(hostPath, 'utf8')
-  assert.match(source, /taskThumbnails/)
-  assert.match(source, /scheduleVisibleTaskThumbnail/)
-  assert.match(source, /taskKey !== visibleTaskKey/)
-  assert.match(source, /taskThumbnailDataUrl/)
-  assert.doesNotMatch(source, /setInterval\(.*thumbnail/)
+test('host speaks the same line-delimited JSON-RPC contract', async () => {
+  const source = await readHost('rpc')
+  // Every op the parent's RemoteElectronViewHost sends must be handled.
+  for (const op of ['ping', 'createView', 'destroyView', 'showView', 'label', 'trace',
+    'drainDialog', 'command', 'capture', 'download', 'flushAuth', 'restoreAuth',
+    'clearCookies', 'listWindows', 'listTasks', 'getTask', 'updateTask', 'configure', 'eval']) {
+    assert.match(source, new RegExp('case "' + op + '"'), 'handles op ' + op)
+  }
+  assert.match(source, /ReadLineAsync/)
+  assert.match(source, /WriteLineAsync/)
+  // A closed socket must end the process so no window outlives the parent.
+  assert.match(source, /parent connection closed, exiting/)
+  const program = await readHost('program')
+  assert.match(program, /--rpc-port/)
+  assert.match(program, /host\.CloseWindow\(\)/)
 })
 
-test('host persists task/trail panel state through bootstrap and patch messages', async () => {
-  const source = await readFile(hostPath, 'utf8')
-  assert.match(source, /workspacePanels/)
-  const chromeStart = source.indexOf('function chromeBootstrapScript')
-  assert.ok(chromeStart >= 0, 'chromeBootstrapScript exists')
-  const chromeBlock = source.slice(chromeStart, chromeStart + 1500)
-  assert.match(chromeBlock, /window\.__dshWorkspacePanels =/)
-  assert.match(chromeBlock, /window\.__dshTrailRender\?\.\(\)/)
-  assert.match(chromeBlock, /window\.__dshTaskRender\?\.\(\)/)
-  assert.match(chromeBlock, /window\.__dshWorkspaceRender\?\.\(\)/)
-  assert.match(source, /function chromePatchScript/)
-  assert.match(source, /queueChromePatch/)
-})
-
-test('host applies set-workspace-panels only when both panel flags are booleans', async () => {
-  const source = await readFile(hostPath, 'utf8')
-  const start = source.indexOf('Runtime.bindingCalled')
-  assert.ok(start >= 0, 'binding handler exists')
-  const bindingBlock = source.slice(start, start + 2600)
-  assert.match(bindingBlock, /set-workspace-panels/)
-  assert.match(bindingBlock, /typeof action\.tasks === 'boolean'/)
-  assert.match(bindingBlock, /typeof action\.trail === 'boolean'/)
-  assert.match(bindingBlock, /workspacePanels = \{ tasks: action\.tasks, trail: action\.trail \}/)
-  assert.match(bindingBlock, /queueChromePatch/)
-})
-
-test('host resets workspace panel state when the shared window closes', async () => {
-  const source = await readFile(hostPath, 'utf8')
-  assert.match(source, /let workspacePanels = \{ tasks: false, trail: false \}/)
-  const closedStart = source.indexOf("win.on('closed'")
-  assert.ok(closedStart >= 0, 'closed handler exists')
-  const closedBlock = source.slice(closedStart, closedStart + 900)
-  assert.match(closedBlock, /workspacePanels = \{ tasks: false, trail: false \}/)
+test('host isolates its profile from the DSH app data directory', async () => {
+  const source = await readHost('browser')
+  assert.match(source, /DSH_HOME/)
+  assert.match(source, /dsh-browser-plus-host/)
 })

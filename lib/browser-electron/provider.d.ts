@@ -1,9 +1,10 @@
 /**
- * Electron-backed browser provider: `WebContentsView` sessions driven over
- * `webContents.debugger` (CDP). The provider itself does not import Electron — it operates through the {@link ElectronBrowserViewHost} seam, which the
- * desktop shell implements with real Electron objects. That keeps this
- * package testable under plain Node and leaves the Electron dependency to the
- * shell that owns the `BrowserWindow`.
+ * CDP-backed browser provider: page sessions driven over the Chrome DevTools
+ * Protocol. The provider itself does not import a browser runtime — it operates
+ * through the {@link ElectronBrowserViewHost} seam, which the host implements
+ * with real page surfaces (the bundled WebView2 host, or a desktop shell's own
+ * views). That keeps this package testable under plain Node and leaves the
+ * runtime dependency to the host that owns the window.
  * @module dsh-browser-plus/browser-electron
  */
 import type { BrowserChallenge, BrowserClearAuthRequest, BrowserClearAuthResult, BrowserContentRequest, BrowserContentResult, BrowserDoubleClickRequest, BrowserExecuteRequest, BrowserExecuteResult, BrowserFillRequest, BrowserFillResult, BrowserHandoffState, BrowserHistoryEntry, BrowserHoverRequest, BrowserOpenOptions, BrowserOpenRequest, BrowserPressKeyRequest, BrowserProvider, BrowserRefRequest, BrowserScrollIntoViewRequest, BrowserScrollRequest, BrowserScrollResult, BrowserSessionId, BrowserSnapshotResult, BrowserSpaceInfo, BrowserTab, BrowserTaskInfo, BrowserTaskUpdate, BrowserUploadFileRequest, BrowserUploadFileResult, BrowserWaitForRequest, BrowserWaitForResult, ExportedCookie } from '../browser/types.ts';

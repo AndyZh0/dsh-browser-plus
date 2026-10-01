@@ -19,7 +19,7 @@ export interface ExportedAuthCookie {
   readonly expirationDate: number | undefined
 }
 
-/** Convert Electron cookies into portable auth records, skipping invalid domains. */
+/** Convert host cookies into portable auth records, skipping invalid domains. */
 export function exportCookiesForAuth(cookies: readonly AuthCookieLike[]): ExportedAuthCookie[] {
   return cookies.flatMap(cookie => {
     const domain = cookie.domain
